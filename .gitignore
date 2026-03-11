@@ -185,3 +185,7 @@ Thumbs.db-e
 .env
 .env.local
 .env.production
+
+# User uploads and generated files
+uploads/
+pdfs/
