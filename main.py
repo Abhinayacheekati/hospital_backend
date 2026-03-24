@@ -138,6 +138,18 @@ async def seed_superadmin():
                 
                 if existing_admin:
                     logger.info(f"SuperAdmin already exists, skipping creation: {settings.SUPERADMIN_EMAIL}")
+                    # Keep superadmin credentials in sync with environment for deployments.
+                    # This avoids login lockout when DB is reused but SUPERADMIN_PASSWORD changes.
+                    if settings.SUPERADMIN_PASSWORD:
+                        password_ok = security.verify_password(
+                            settings.SUPERADMIN_PASSWORD,
+                            existing_admin.password_hash,
+                        )
+                        if not password_ok:
+                            logger.info("SuperAdmin password mismatch detected; syncing from environment")
+                            existing_admin.password_hash = security.hash_password(settings.SUPERADMIN_PASSWORD)
+                            await db.commit()
+                            logger.info("SuperAdmin password synced successfully")
                     # Verify all roles exist
                     logger.info(f"Verifying all {len(required_roles)} roles exist...")
                     all_roles_query = select(Role)
