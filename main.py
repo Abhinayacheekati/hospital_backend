@@ -49,16 +49,12 @@ _setup_lock = asyncio.Lock()
 
 def acquire_advisory_lock(db_url: str, lock_id: int) -> bool:
     """Acquire PostgreSQL advisory lock for concurrency safety"""
-    try:
-        engine = create_engine(db_url)
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT pg_try_advisory_lock(:lock_id)"), {"lock_id": lock_id})
-            acquired = result.scalar()
-            logger.info(f"Advisory lock {lock_id} acquired: {acquired}")
-            return acquired
-    except Exception as e:
-        logger.error(f"Failed to acquire advisory lock: {e}")
-        return False
+    engine = create_engine(db_url)
+    with engine.connect() as conn:
+        result = conn.execute(text("SELECT pg_try_advisory_lock(:lock_id)"), {"lock_id": lock_id})
+        acquired = result.scalar()
+        logger.info(f"Advisory lock {lock_id} acquired: {acquired}")
+        return bool(acquired)
 
 
 def release_advisory_lock(db_url: str, lock_id: int):
