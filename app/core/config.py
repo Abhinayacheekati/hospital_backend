@@ -3,7 +3,7 @@ Application configuration settings.
 Manages environment variables and application settings.
 """
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, model_validator
 from typing import Optional
 import os
 import logging
@@ -37,8 +37,8 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = Field(default=10, env="DB_MAX_OVERFLOW")
     
     # Database URLs - Direct from environment
-    DATABASE_URL: str = Field(env="DATABASE_URL")
-    DATABASE_URL_SYNC: str = Field(env="DATABASE_URL_SYNC")
+    DATABASE_URL: str = Field(default="", env="DATABASE_URL")
+    DATABASE_URL_SYNC: str = Field(default="", env="DATABASE_URL_SYNC")
     # Optional: prune legacy tables not used by current models (dev/local only)
     DB_PRUNE_UNUSED_TABLES: bool = Field(default=False, env="DB_PRUNE_UNUSED_TABLES")
     # Optional: bootstrap schema directly from SQLAlchemy models instead of Alembic
@@ -123,6 +123,51 @@ class Settings(BaseSettings):
     PAYTM_ENV: str = Field(default="sandbox", env="PAYTM_ENV")
     PAYTM_WEBSITE: str = Field(default="WEBSTAGING", env="PAYTM_WEBSITE")
     PAYTM_CALLBACK_URL: str = Field(default="", env="PAYTM_CALLBACK_URL")
+
+    @model_validator(mode="after")
+    def normalize_database_urls(self):
+        """
+        Allow Render-style single URL setup by deriving the missing URL.
+        Ensures async engine gets asyncpg URL and sync operations get sync URL.
+        """
+        async_url = (self.DATABASE_URL or "").strip()
+        sync_url = (self.DATABASE_URL_SYNC or "").strip()
+
+        if not async_url and not sync_url:
+            raise ValueError("Set DATABASE_URL and/or DATABASE_URL_SYNC in environment variables")
+
+        if async_url and not sync_url:
+            sync_url = self._to_sync_url(async_url)
+        elif sync_url and not async_url:
+            async_url = self._to_async_url(sync_url)
+        else:
+            # Normalize both when both are provided (handles postgres:// legacy scheme).
+            async_url = self._to_async_url(async_url)
+            sync_url = self._to_sync_url(sync_url)
+
+        self.DATABASE_URL = async_url
+        self.DATABASE_URL_SYNC = sync_url
+        return self
+
+    @staticmethod
+    def _to_async_url(url: str) -> str:
+        value = (url or "").strip()
+        if value.startswith("postgres://"):
+            value = value.replace("postgres://", "postgresql+asyncpg://", 1)
+        elif value.startswith("postgresql+psycopg2://"):
+            value = value.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
+        elif value.startswith("postgresql://"):
+            value = value.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return value
+
+    @staticmethod
+    def _to_sync_url(url: str) -> str:
+        value = (url or "").strip()
+        if value.startswith("postgres://"):
+            value = value.replace("postgres://", "postgresql://", 1)
+        elif value.startswith("postgresql+asyncpg://"):
+            value = value.replace("postgresql+asyncpg://", "postgresql://", 1)
+        return value
     
     # Lowercase alias properties for backward compatibility
     @property

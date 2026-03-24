@@ -3,7 +3,6 @@ Database session management for async SQLAlchemy.
 Provides async engine and session factory.
 """
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.pool import QueuePool
 from sqlalchemy import text
 import logging
 from typing import AsyncGenerator
@@ -13,12 +12,11 @@ from app.database.base import Base  # Re-export Base for convenience
 
 logger = logging.getLogger(__name__)
 
-# Create async engine with connection pooling
-# QueuePool manages a pool of connections to avoid "too many connections" errors
+# Create async engine with connection pooling.
+# Use SQLAlchemy's async-compatible default pool implementation.
 async_engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG,
-    poolclass=QueuePool,
     pool_size=10,  # Number of connections to maintain in the pool
     max_overflow=20,  # Maximum number of connections to create beyond pool_size
     pool_pre_ping=True,  # Verify connections before using them
