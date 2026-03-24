@@ -29,23 +29,22 @@ security = HTTPBearer()
 
 
 # ============================================================================
-# SUPER ADMIN ENDPOINTS
+# LOGIN ENDPOINTS
 # ============================================================================
 
-@router.post("/super-admin/login")
-async def super_admin_login(
+# Unified login for Super Admin, Hospital Admin, and Hospital Staff.
+# Patients must use `POST /api/v1/auth/patient/login`.
+@router.post("/login")
+async def login(
     login_data: LoginCreate,
     db: AsyncSession = Depends(get_db_session)
 ) -> APIResponse[AuthOut]:
-    """
-    Super Admin login - predefined credentials, no OTP
-    """
     auth_service = AuthService(db)
-    result = await auth_service.super_admin_login(login_data.email, login_data.password)
+    result = await auth_service.staff_admin_super_admin_login(login_data.email, login_data.password)
     
     return SuccessResponse(
         success=True,
-        message="Super Admin login successful",
+        message="Login successful",
         data=AuthOut(**result)
     ).dict()
 
@@ -108,24 +107,6 @@ async def create_hospital_admin(
 # HOSPITAL ADMIN ENDPOINTS
 # ============================================================================
 
-@router.post("/hospital-admin/login")
-async def hospital_admin_login(
-    login_data: LoginCreate,
-    db: AsyncSession = Depends(get_db_session)
-) -> APIResponse[AuthOut]:
-    """
-    Hospital Admin login - uses credentials from Super Admin, no OTP
-    """
-    auth_service = AuthService(db)
-    result = await auth_service.hospital_admin_login(login_data.email, login_data.password)
-    
-    return SuccessResponse(
-        success=True,
-        message="Hospital Admin login successful",
-        data=AuthOut(**result)
-    ).dict()
-
-
 @router.post("/hospital-admin/change-password")
 async def hospital_admin_change_password(
     change_data: PasswordChangeUpdate,
@@ -154,24 +135,6 @@ async def hospital_admin_change_password(
 # ============================================================================
 # STAFF ENDPOINTS
 # ============================================================================
-
-@router.post("/staff/login")
-async def staff_login(
-    login_data: LoginCreate,
-    db: AsyncSession = Depends(get_db_session)
-) -> APIResponse[AuthOut]:
-    """
-    Staff login - uses credentials from Hospital Admin, no OTP
-    """
-    auth_service = AuthService(db)
-    result = await auth_service.staff_login(login_data.email, login_data.password)
-    
-    return SuccessResponse(
-        success=True,
-        message="Staff login successful",
-        data=AuthOut(**result)
-    ).dict()
-
 
 @router.post("/staff/change-password")
 async def staff_change_password(

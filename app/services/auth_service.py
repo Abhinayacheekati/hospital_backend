@@ -576,11 +576,24 @@ class AuthService:
         # Check if user has HOSPITAL_ADMIN role
         user_roles = [role.name for role in user.roles]
         logger.debug(f"DEBUG: User roles: {user_roles}")
+
+        if "HOSPITAL_ADMIN" not in user_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "AUTH_002", "message": "Hospital Admin access required"}
+            )
         
         # Check password
         logger.debug(f"DEBUG: Checking password")
         password_valid = self.security.verify_password(password, user.password_hash)
         logger.debug(f"DEBUG: Password valid: {password_valid}")
+
+        if not password_valid:
+            await self._log_failed_login(user.id, "invalid_password")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"code": "AUTH_001", "message": "Invalid credentials"}
+            )
         
         logger.debug("DEBUG: Login successful, generating tokens")
         # Generate tokens
@@ -614,6 +627,51 @@ class AuthService:
             )
         
         # Generate tokens
+        return await self._generate_auth_response(user)
+    
+    async def staff_admin_super_admin_login(self, email: str, password: str) -> Dict[str, Any]:
+        """
+        Unified login for:
+        - SUPER_ADMIN
+        - HOSPITAL_ADMIN
+        - Hospital staff roles (DOCTOR, NURSE, RECEPTIONIST, PHARMACIST, LAB_TECH)
+
+        Patients must use the dedicated patient login endpoint.
+        """
+        user = await self._get_user_by_email(email)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"code": "AUTH_001", "message": "Invalid credentials"}
+            )
+
+        user_roles = [role.name for role in user.roles] if user.roles else []
+
+        staff_roles = ["DOCTOR", "NURSE", "RECEPTIONIST", "PHARMACIST", "LAB_TECH"]
+        has_allowed_role = (
+            "SUPER_ADMIN" in user_roles
+            or "HOSPITAL_ADMIN" in user_roles
+            or any(role in user_roles for role in staff_roles)
+        )
+
+        if not has_allowed_role:
+            if "PATIENT" in user_roles:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={"code": "AUTH_002", "message": "Patient accounts must use patient login"}
+                )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "AUTH_002", "message": "Access denied for this account type"}
+            )
+
+        if not self.security.verify_password(password, user.password_hash):
+            await self._log_failed_login(user.id, "invalid_password")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"code": "AUTH_001", "message": "Invalid credentials"}
+            )
+
         return await self._generate_auth_response(user)
     
     async def patient_login(self, email: str, password: str) -> Dict[str, Any]:
