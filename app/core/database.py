@@ -16,7 +16,7 @@ from app.core.config import settings
 
 # Single engine and session factory - imported from app.database.session
 from app.database.session import (
-    async_engine,
+    get_async_engine,
     AsyncSessionLocal,
     get_db_session,
 )
@@ -64,7 +64,8 @@ def run_alembic_upgrade():
 async def test_database_connection():
     """Test database connectivity."""
     try:
-        async with async_engine.begin() as conn:
+        engine = get_async_engine()
+        async with engine.begin() as conn:
             result = await conn.execute(text("SELECT 1"))
             result.fetchone()
         logger.info("Database connection test successful")
@@ -94,5 +95,6 @@ async def init_database():
 
 async def close_database():
     """Close database connections."""
-    await async_engine.dispose()
+    engine = get_async_engine()
+    await engine.dispose()
     logger.info("Database connections closed")

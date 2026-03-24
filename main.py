@@ -17,7 +17,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError, OperationalError, DBAPIError
 
 from app.core.config import settings
-from app.database.session import init_database, close_database, get_db_session, async_engine
+from app.database.session import init_database, close_database, get_db_session, get_async_engine
 from app.middleware.tenant_isolation import TenantIsolationMiddleware
 from app.middleware.clinical_audit import ClinicalAuditMiddleware
 from app.api.v1.api import api_router
@@ -253,7 +253,8 @@ async def create_pharmacy_tables_if_needed():
         
         logger.info(" Checking pharmacy tables...")
         
-        async with async_engine.begin() as conn:
+        engine = get_async_engine()
+        async with engine.begin() as conn:
             # Use SQLAlchemy metadata to create all pharmacy tables
             # This automatically creates all tables defined in pharmacy models
             await conn.run_sync(TenantBaseModel.metadata.create_all, checkfirst=True)
@@ -274,7 +275,8 @@ async def create_all_tables_from_models():
         from app.database.base import Base
 
         logger.info(" Creating all tables from SQLAlchemy models (DB_BOOTSTRAP_FROM_MODELS=True)...")
-        async with async_engine.begin() as conn:
+        engine = get_async_engine()
+        async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all, checkfirst=True)
         logger.info(" All tables created/verified successfully from models")
     except Exception as e:
@@ -373,14 +375,15 @@ async def _post_daily_bed_charges():
 async def lifespan(app: FastAPI):
     """Application lifespan with single setup function"""
     logger.info(" Starting Hospital Management SaaS application...")
-    
+    db_ready = False
     try:
-        await setup_database_once()
-        logger.info(" Application startup complete - Ready to serve requests")
-        
+        db_ready = await setup_database_once()
+        if db_ready:
+            logger.info(" Application startup complete - Ready to serve requests")
+        else:
+            logger.warning(" Application started in degraded mode (database setup incomplete)")
     except Exception as e:
-        logger.exception(f" Application startup failed: {e}")
-        raise
+        logger.exception(f" Database unavailable during startup, running in degraded mode: {e}")
 
     # ── FIX: Start notification worker as background task ──────────────────
     # Previously the notification worker was a separate manual script
@@ -388,22 +391,28 @@ async def lifespan(app: FastAPI):
     # whenever the script was not started manually.
     # Now it runs automatically as part of the app lifecycle.
     _worker_task = None
-    try:
-        from app.services.notifications.worker import start_worker_background
-        _worker_task = start_worker_background(interval_seconds=30, batch_size=50)
-        logger.info("✓ Notification worker background task started")
-    except Exception as worker_ex:
-        logger.error(f"✗ Notification worker failed to start: {worker_ex}")
+    if db_ready:
+        try:
+            from app.services.notifications.worker import start_worker_background
+            _worker_task = start_worker_background(interval_seconds=30, batch_size=50)
+            logger.info("✓ Notification worker background task started")
+        except Exception as worker_ex:
+            logger.error(f"✗ Notification worker failed to start: {worker_ex}")
+    else:
+        logger.warning("! Notification worker not started (database unavailable)")
 
     # ── FIX: Start IPD daily bed charge scheduler ──────────────────────────
     # Previously bed charges required a manual API call each day.
     # This scheduler runs at midnight and auto-posts daily bed charges.
     _bed_charge_task = None
-    try:
-        _bed_charge_task = asyncio.create_task(_run_bed_charge_scheduler())
-        logger.info("✓ IPD daily bed charge scheduler started")
-    except Exception as sched_ex:
-        logger.error(f"✗ Bed charge scheduler failed to start: {sched_ex}")
+    if db_ready:
+        try:
+            _bed_charge_task = asyncio.create_task(_run_bed_charge_scheduler())
+            logger.info("✓ IPD daily bed charge scheduler started")
+        except Exception as sched_ex:
+            logger.error(f"✗ Bed charge scheduler failed to start: {sched_ex}")
+    else:
+        logger.warning("! Bed charge scheduler not started (database unavailable)")
 
     yield
     
@@ -417,14 +426,14 @@ async def lifespan(app: FastAPI):
     logger.info("Application shutdown complete")
 
 
-async def setup_database_once():
+async def setup_database_once() -> bool:
     """Single database setup function with strict ordering"""
     global _setup_completed
     
     async with _setup_lock:
         if _setup_completed:
             logger.info(" Database setup already completed in this process")
-            return
+            return True
         
         # Use PostgreSQL advisory lock for cross-process safety
         MIGRATION_LOCK_ID = 123456789
@@ -433,7 +442,7 @@ async def setup_database_once():
         if not lock_acquired:
             logger.info(" Another process is running setup; skipping in this process.")
             _setup_completed = True
-            return
+            return True
         
         try:
             # Step 1: Test database connection
@@ -472,10 +481,11 @@ async def setup_database_once():
             
             _setup_completed = True
             logger.info(" Database setup completed successfully")
+            return True
             
         except Exception as e:
             logger.exception(f" Database setup failed: {e}")
-            raise
+            return False
         finally:
             # Always release the advisory lock
             try:
@@ -675,6 +685,12 @@ app = FastAPI(
 )
 
 
+@app.on_event("startup")
+async def startup_event():
+    """Startup hook for deployment diagnostics."""
+    logger.info("FastAPI startup event triggered")
+
+
 # Use default OpenAPI - all endpoints show in Swagger (no custom filtering)
 
 # Add CORS middleware
@@ -746,7 +762,8 @@ async def health_check():
 
     try:
         # Lightweight connectivity check - consume result for driver compatibility
-        async with async_engine.begin() as conn:
+        engine = get_async_engine()
+        async with engine.begin() as conn:
             result = await conn.execute(text("SELECT 1"))
             result.fetchone()
         db_ok = True
