@@ -638,7 +638,8 @@ class AuthService:
 
         Patients must use the dedicated patient login endpoint.
         """
-        user = await self._get_user_by_email(email)
+        normalized_email = (email or "").strip().lower()
+        user = await self._get_user_by_email(normalized_email)
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1046,10 +1047,11 @@ class AuthService:
     async def _get_user_by_email(self, email: str) -> Optional[User]:
         """Get user by email with roles loaded"""
         from sqlalchemy.orm import selectinload
+        normalized_email = (email or "").strip().lower()
         result = await self.db.execute(
             select(User)
             .options(selectinload(User.roles).selectinload(Role.permissions))
-            .where(User.email == email.lower())
+            .where(func.lower(User.email) == normalized_email)
         )
         return result.scalar_one_or_none()
     

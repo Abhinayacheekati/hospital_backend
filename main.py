@@ -79,7 +79,7 @@ async def seed_superadmin():
             from app.models.user import User, Role, user_roles
             from app.models.tenant import Hospital
             from app.core.security import SecurityManager
-            from sqlalchemy import select
+            from sqlalchemy import select, func
             
             try:
                 # Step 1: Create all required roles first
@@ -131,13 +131,14 @@ async def seed_superadmin():
                     logger.info(f"Committed {roles_created} new roles to database")
                 
                 # Step 2: Check if Super Admin already exists
-                logger.info(f"Checking if SuperAdmin exists: {settings.SUPERADMIN_EMAIL}")
-                existing_admin_query = select(User).where(User.email == settings.SUPERADMIN_EMAIL)
+                superadmin_email = (settings.SUPERADMIN_EMAIL or "").strip().lower()
+                logger.info(f"Checking if SuperAdmin exists: {superadmin_email}")
+                existing_admin_query = select(User).where(func.lower(User.email) == superadmin_email)
                 existing_admin_result = await db.execute(existing_admin_query)
                 existing_admin = existing_admin_result.scalar_one_or_none()
                 
                 if existing_admin:
-                    logger.info(f"SuperAdmin already exists, skipping creation: {settings.SUPERADMIN_EMAIL}")
+                    logger.info(f"SuperAdmin already exists, skipping creation: {superadmin_email}")
                     # Keep superadmin credentials in sync with environment for deployments.
                     # This avoids login lockout when DB is reused but SUPERADMIN_PASSWORD changes.
                     if settings.SUPERADMIN_PASSWORD:
@@ -198,7 +199,7 @@ async def seed_superadmin():
                 user = User(
                     id=uuid.uuid4(),
                     hospital_id=hospital_id,
-                    email=settings.SUPERADMIN_EMAIL,
+                    email=superadmin_email,
                     phone="+1000000000",
                     password_hash=password_hash,
                     first_name=settings.SUPERADMIN_FIRST_NAME,
@@ -223,7 +224,7 @@ async def seed_superadmin():
                 await db.commit()
                 
                 logger.info("SuperAdmin and roles created successfully!")
-                logger.info(f" Email: {settings.SUPERADMIN_EMAIL}")
+                logger.info(f" Email: {superadmin_email}")
                 logger.info(f" Password: {settings.SUPERADMIN_PASSWORD}")
                 logger.info(f" User ID: {user.id}")
                 logger.info(f" Roles created: {list(role_ids.keys())}")
@@ -234,7 +235,7 @@ async def seed_superadmin():
                 await db.rollback()
                 
                 # Double-check if user was created by another process
-                check_query = select(User).where(User.email == settings.SUPERADMIN_EMAIL)
+                check_query = select(User).where(func.lower(User.email) == superadmin_email)
                 check_result = await db.execute(check_query)
                 if check_result.scalar_one_or_none():
                     logger.info(" SuperAdmin already exists (created by concurrent process), skipping")
@@ -808,7 +809,9 @@ async def verify_superadmin():
         from sqlalchemy import select, func
         
         admin_count = await db.execute(
-            select(func.count(User.id)).where(User.email == settings.SUPERADMIN_EMAIL)
+            select(func.count(User.id)).where(
+                func.lower(User.email) == (settings.SUPERADMIN_EMAIL or "").strip().lower()
+            )
         )
         count = admin_count.scalar()
         
