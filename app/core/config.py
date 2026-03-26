@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     
     # CORS
     ALLOWED_ORIGINS: list = ["http://localhost:3000", "http://localhost:8080"]
+
+    # Public URL of this backend (used to generate links sent to frontend/emails).
+    # Set this to your Render URL, e.g. https://hospital-backend-9mg3.onrender.com
+    APP_PUBLIC_URL: str = Field(default="http://localhost:8060", env="APP_PUBLIC_URL")
     
     # Email Configuration
     SMTP_HOST: str = Field(default="smtp.gmail.com", env="SMTP_HOST")

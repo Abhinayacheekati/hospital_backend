@@ -5,7 +5,7 @@ CRITICAL: All operations are scoped to the hospital_id from JWT token.
 """
 import uuid
 import random
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional, Dict, Any, List
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func, desc, asc, or_
@@ -19,6 +19,36 @@ from app.models.patient import PatientProfile
 from app.models.doctor import DoctorProfile
 from app.core.enums import UserRole, UserStatus
 from app.core.security import SecurityManager
+
+
+def _parse_iso_date(value: Optional[str]) -> Optional[date]:
+    """Parse YYYY-MM-DD from query params / ISO strings."""
+    if not value:
+        return None
+    s = str(value).strip()
+    if len(s) < 10:
+        return None
+    try:
+        return date.fromisoformat(s[:10])
+    except ValueError:
+        return None
+
+
+def _appointment_calendar_day(value: Any) -> Optional[date]:
+    """Normalize appointment_date from ORM (str, date, or datetime) for Python-side filters."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    s = str(value).strip()
+    if len(s) >= 10:
+        try:
+            return date.fromisoformat(s[:10])
+        except ValueError:
+            return None
+    return None
 
 
 class HospitalAdminService:
@@ -2716,31 +2746,33 @@ class HospitalAdminService:
         # Filter by status (derived from is_active and discharge_date)
         if status_filter:
             if status_filter == "ADMITTED":
-                query = query.where(and_(Admission.is_active == True, Admission.discharge_date == None))
+                query = query.where(and_(Admission.is_active == True, Admission.discharge_date.is_(None)))
             elif status_filter == "DISCHARGED":
-                query = query.where(Admission.discharge_date != None)
+                query = query.where(Admission.discharge_date.isnot(None))
             else:
                 query = query.where(Admission.is_active == True)  # fallback
-        
-        # Filter by date range
-        if date_from:
-            query = query.where(Admission.admission_date >= date_from)
-        if date_to:
-            query = query.where(Admission.admission_date <= date_to)
-        
+        date_from_d = _parse_iso_date(date_from)
+        date_to_d = _parse_iso_date(date_to)
+
+        # Filter by date range (admission_date is timestamptz in PostgreSQL)
+        if date_from_d:
+            query = query.where(func.date(Admission.admission_date) >= date_from_d)
+        if date_to_d:
+            query = query.where(func.date(Admission.admission_date) <= date_to_d)
+
         # Get total count
         count_query = select(func.count(Admission.id)).where(Admission.hospital_id == self.hospital_id)
         if status_filter:
             if status_filter == "ADMITTED":
-                count_query = count_query.where(and_(Admission.is_active == True, Admission.discharge_date == None))
+                count_query = count_query.where(and_(Admission.is_active == True, Admission.discharge_date.is_(None)))
             elif status_filter == "DISCHARGED":
-                count_query = count_query.where(Admission.discharge_date != None)
+                count_query = count_query.where(Admission.discharge_date.isnot(None))
             else:
                 count_query = count_query.where(Admission.is_active == True)
-        if date_from:
-            count_query = count_query.where(Admission.admission_date >= date_from)
-        if date_to:
-            count_query = count_query.where(Admission.admission_date <= date_to)
+        if date_from_d:
+            count_query = count_query.where(func.date(Admission.admission_date) >= date_from_d)
+        if date_to_d:
+            count_query = count_query.where(func.date(Admission.admission_date) <= date_to_d)
         
         total_result = await self.db.execute(count_query)
         total = total_result.scalar()
@@ -2839,15 +2871,17 @@ class HospitalAdminService:
         occupancy_rate = round((occupied_beds / total_beds * 100) if total_beds > 0 else 0, 1)
         
         # Get admissions in date range for trend analysis (status derived from is_active and discharge_date)
+        df_occ = _parse_iso_date(date_from)
+        dt_occ = _parse_iso_date(date_to)
         admissions_query = select(Admission).where(
             and_(
                 Admission.hospital_id == self.hospital_id,
-                Admission.admission_date >= date_from,
-                Admission.admission_date <= date_to,
+                func.date(Admission.admission_date) >= df_occ,
+                func.date(Admission.admission_date) <= dt_occ,
                 or_(
-                    and_(Admission.is_active == True, Admission.discharge_date == None),
-                    Admission.discharge_date != None
-                )
+                    and_(Admission.is_active == True, Admission.discharge_date.is_(None)),
+                    Admission.discharge_date.isnot(None),
+                ),
             )
         )
         
@@ -2911,16 +2945,17 @@ class HospitalAdminService:
             trend_date = (datetime.utcnow() - timedelta(days=i)).date()
             
             # Count admissions on this date
-            daily_admissions = len([
-                adm for adm in admissions 
-                if adm.admission_date == trend_date.isoformat()
-            ])
-            
-            # Count discharges on this date
-            daily_discharges = len([
-                adm for adm in admissions 
-                if adm.discharge_date == trend_date.isoformat()
-            ])
+            daily_admissions = len(
+                [adm for adm in admissions if _appointment_calendar_day(adm.admission_date) == trend_date]
+            )
+
+            daily_discharges = len(
+                [
+                    adm
+                    for adm in admissions
+                    if adm.discharge_date and _appointment_calendar_day(adm.discharge_date) == trend_date
+                ]
+            )
             
             daily_trends.append({
                 "date": trend_date.isoformat(),
@@ -3300,12 +3335,14 @@ class HospitalAdminService:
         from app.models.patient import Appointment, Admission, PatientProfile
         from app.models.doctor import DoctorProfile
         from app.models.user import User
-        from app.core.enums import BedStatus, AdmissionStatus
-        
-        # Get current date for today's metrics
-        today = datetime.utcnow().date().isoformat()
-        this_month_start = datetime.utcnow().replace(day=1).date().isoformat()
-        
+        from app.models.payments.payment import Payment
+        from app.core.enums import BedStatus
+
+        # Calendar dates (PostgreSQL: compare via DATE(...) — avoids timestamptz = varchar errors)
+        today_d = datetime.utcnow().date()
+        this_month_start_d = datetime.utcnow().replace(day=1).date()
+        thirty_days_ago_d = today_d - timedelta(days=30)
+
         # === PATIENT METRICS ===
         # Total patients
         total_patients_result = await self.db.execute(
@@ -3316,12 +3353,11 @@ class HospitalAdminService:
         total_patients = total_patients_result.scalar() or 0
         
         # Active patients (with appointments in last 30 days)
-        thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).date().isoformat()
         active_patients_result = await self.db.execute(
             select(func.count(func.distinct(Appointment.patient_id))).where(
                 and_(
                     Appointment.hospital_id == self.hospital_id,
-                    Appointment.appointment_date >= thirty_days_ago
+                    func.date(Appointment.appointment_date) >= thirty_days_ago_d,
                 )
             )
         )
@@ -3341,7 +3377,7 @@ class HospitalAdminService:
             select(func.count(func.distinct(Appointment.doctor_id))).where(
                 and_(
                     Appointment.hospital_id == self.hospital_id,
-                    Appointment.appointment_date >= thirty_days_ago
+                    func.date(Appointment.appointment_date) >= thirty_days_ago_d,
                 )
             )
         )
@@ -3364,7 +3400,7 @@ class HospitalAdminService:
             select(func.count(Appointment.id)).where(
                 and_(
                     Appointment.hospital_id == self.hospital_id,
-                    Appointment.appointment_date == today
+                    func.date(Appointment.appointment_date) == today_d,
                 )
             )
         )
@@ -3375,7 +3411,7 @@ class HospitalAdminService:
             select(func.count(Appointment.id)).where(
                 and_(
                     Appointment.hospital_id == self.hospital_id,
-                    Appointment.appointment_date >= this_month_start
+                    func.date(Appointment.appointment_date) >= this_month_start_d,
                 )
             )
         )
@@ -3386,8 +3422,8 @@ class HospitalAdminService:
             select(func.count(Appointment.id)).where(
                 and_(
                     Appointment.hospital_id == self.hospital_id,
-                    Appointment.appointment_date >= this_month_start,
-                    Appointment.status == "COMPLETED"
+                    func.date(Appointment.appointment_date) >= this_month_start_d,
+                    Appointment.status == "COMPLETED",
                 )
             )
         )
@@ -3417,7 +3453,7 @@ class HospitalAdminService:
                 and_(
                     Admission.hospital_id == self.hospital_id,
                     Admission.is_active == True,
-                    Admission.discharge_date == None
+                    Admission.discharge_date.is_(None),
                 )
             )
         )
@@ -3428,7 +3464,7 @@ class HospitalAdminService:
             select(func.count(Admission.id)).where(
                 and_(
                     Admission.hospital_id == self.hospital_id,
-                    Admission.admission_date == today
+                    func.date(Admission.admission_date) == today_d,
                 )
             )
         )
@@ -3439,7 +3475,7 @@ class HospitalAdminService:
             select(func.count(Admission.id)).where(
                 and_(
                     Admission.hospital_id == self.hospital_id,
-                    Admission.discharge_date == today
+                    func.date(Admission.discharge_date) == today_d,
                 )
             )
         )
@@ -3464,8 +3500,8 @@ class HospitalAdminService:
             select(func.coalesce(func.sum(Appointment.consultation_fee), 0)).where(
                 and_(
                     Appointment.hospital_id == self.hospital_id,
-                    Appointment.appointment_date >= this_month_start,
-                    Appointment.status == "COMPLETED"
+                    func.date(Appointment.appointment_date) >= this_month_start_d,
+                    Appointment.status == "COMPLETED",
                 )
             )
         )
@@ -3476,8 +3512,9 @@ class HospitalAdminService:
             select(func.coalesce(func.sum(Payment.amount), 0)).where(
                 and_(
                     Payment.hospital_id == self.hospital_id,
-                    Payment.payment_date >= this_month_start,
-                    Payment.status == "COMPLETED"
+                    Payment.paid_at.isnot(None),
+                    func.date(Payment.paid_at) >= this_month_start_d,
+                    Payment.status == "SUCCESS",
                 )
             )
         )
@@ -3491,13 +3528,13 @@ class HospitalAdminService:
         # Recent activity (last 7 days trend)
         recent_activity = []
         for i in range(7):
-            activity_date = (datetime.utcnow() - timedelta(days=i)).date().isoformat()
-            
+            activity_d = (datetime.utcnow() - timedelta(days=i)).date()
+
             daily_appointments_result = await self.db.execute(
                 select(func.count(Appointment.id)).where(
                     and_(
                         Appointment.hospital_id == self.hospital_id,
-                        Appointment.appointment_date == activity_date
+                        func.date(Appointment.appointment_date) == activity_d,
                     )
                 )
             )
@@ -3507,17 +3544,19 @@ class HospitalAdminService:
                 select(func.count(Admission.id)).where(
                     and_(
                         Admission.hospital_id == self.hospital_id,
-                        Admission.admission_date == activity_date
+                        func.date(Admission.admission_date) == activity_d,
                     )
                 )
             )
             daily_admissions = daily_admissions_result.scalar() or 0
             
-            recent_activity.append({
-                "date": activity_date,
-                "appointments": daily_appointments,
-                "admissions": daily_admissions
-            })
+            recent_activity.append(
+                {
+                    "date": activity_d.isoformat(),
+                    "appointments": daily_appointments,
+                    "admissions": daily_admissions,
+                }
+            )
         
         recent_activity.reverse()  # Show oldest to newest
         
@@ -3614,15 +3653,15 @@ class HospitalAdminService:
         
         # Calculate doctor statistics
         doctor_stats = []
-        thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).date().isoformat()
-        
+        thirty_days_ago_d = (datetime.utcnow() - timedelta(days=30)).date()
+
         for doctor in doctors:
             # Get appointment count for last 30 days
             appointments_result = await self.db.execute(
                 select(func.count(Appointment.id)).where(
                     and_(
                         Appointment.doctor_id == doctor.id,
-                        Appointment.appointment_date >= thirty_days_ago
+                        func.date(Appointment.appointment_date) >= thirty_days_ago_d,
                     )
                 )
             )
@@ -3633,8 +3672,8 @@ class HospitalAdminService:
                 select(func.count(Appointment.id)).where(
                     and_(
                         Appointment.doctor_id == doctor.id,
-                        Appointment.appointment_date >= thirty_days_ago,
-                        Appointment.status == "COMPLETED"
+                        func.date(Appointment.appointment_date) >= thirty_days_ago_d,
+                        Appointment.status == "COMPLETED",
                     )
                 )
             )
@@ -3707,11 +3746,11 @@ class HospitalAdminService:
         from app.models.doctor import DoctorProfile
         
         # Date ranges
-        today = datetime.utcnow().date().isoformat()
-        this_week_start = (datetime.utcnow() - timedelta(days=datetime.utcnow().weekday())).date().isoformat()
-        this_month_start = datetime.utcnow().replace(day=1).date().isoformat()
-        last_30_days = (datetime.utcnow() - timedelta(days=30)).date().isoformat()
-        
+        today_d = datetime.utcnow().date()
+        this_week_start_d = (datetime.utcnow() - timedelta(days=datetime.utcnow().weekday())).date()
+        this_month_start_d = datetime.utcnow().replace(day=1).date()
+        last_30_d = (datetime.utcnow() - timedelta(days=30)).date()
+
         # Get all appointments for analysis
         appointments_result = await self.db.execute(
             select(Appointment).options(
@@ -3720,7 +3759,7 @@ class HospitalAdminService:
             ).where(
                 and_(
                     Appointment.hospital_id == self.hospital_id,
-                    Appointment.appointment_date >= last_30_days
+                    func.date(Appointment.appointment_date) >= last_30_d,
                 )
             )
         )
@@ -3739,13 +3778,17 @@ class HospitalAdminService:
         no_show_rate = round((no_show_appointments / total_appointments * 100) if total_appointments > 0 else 0, 1)
         
         # Today's appointments
-        todays_appointments = [a for a in appointments if a.appointment_date == today]
-        
+        todays_appointments = [a for a in appointments if _appointment_calendar_day(a.appointment_date) == today_d]
+
         # This week's appointments
-        weekly_appointments = [a for a in appointments if a.appointment_date >= this_week_start]
-        
+        weekly_appointments = [
+            a for a in appointments if _appointment_calendar_day(a.appointment_date) >= this_week_start_d
+        ]
+
         # This month's appointments
-        monthly_appointments = [a for a in appointments if a.appointment_date >= this_month_start]
+        monthly_appointments = [
+            a for a in appointments if _appointment_calendar_day(a.appointment_date) >= this_month_start_d
+        ]
         
         # Department-wise breakdown
         department_stats = {}
@@ -3793,16 +3836,18 @@ class HospitalAdminService:
         # Daily trend (last 7 days)
         daily_trends = []
         for i in range(7):
-            trend_date = (datetime.utcnow() - timedelta(days=i)).date().isoformat()
-            daily_appointments = [a for a in appointments if a.appointment_date == trend_date]
+            trend_d = (datetime.utcnow() - timedelta(days=i)).date()
+            daily_appointments = [a for a in appointments if _appointment_calendar_day(a.appointment_date) == trend_d]
             
-            daily_trends.append({
-                "date": trend_date,
-                "total_appointments": len(daily_appointments),
-                "completed": len([a for a in daily_appointments if a.status == "COMPLETED"]),
-                "cancelled": len([a for a in daily_appointments if a.status == "CANCELLED"]),
-                "no_show": len([a for a in daily_appointments if a.status == "NO_SHOW"])
-            })
+            daily_trends.append(
+                {
+                    "date": trend_d.isoformat(),
+                    "total_appointments": len(daily_appointments),
+                    "completed": len([a for a in daily_appointments if a.status == "COMPLETED"]),
+                    "cancelled": len([a for a in daily_appointments if a.status == "CANCELLED"]),
+                    "no_show": len([a for a in daily_appointments if a.status == "NO_SHOW"]),
+                }
+            )
         
         daily_trends.reverse()  # Show oldest to newest
         
@@ -3828,8 +3873,8 @@ class HospitalAdminService:
             "generated_at": datetime.utcnow().isoformat(),
             "hospital_id": str(self.hospital_id),
             "date_range": {
-                "from": last_30_days,
-                "to": today
+                "from": last_30_d.isoformat(),
+                "to": today_d.isoformat(),
             },
             "overall_statistics": {
                 "total_appointments": total_appointments,

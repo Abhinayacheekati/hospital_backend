@@ -5114,8 +5114,11 @@ class LabService:
             await self.db.commit()
             await self.db.refresh(share_token)
             
-            # Generate share URL (you'll need to configure base URL)
-            base_url = "https://hospital.com"  # Configure this
+            # Generate share URL used by the frontend to open shared reports.
+            # Keep it configurable (do not hardcode company/domain).
+            base_url = str(getattr(settings, "APP_PUBLIC_URL", "") or "").rstrip("/")
+            if not base_url:
+                base_url = "http://localhost:8060"
             share_url = f"{base_url}/lab/report-share/{token}"
             
             return {
