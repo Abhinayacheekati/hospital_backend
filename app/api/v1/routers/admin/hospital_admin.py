@@ -196,7 +196,8 @@ async def create_staff_user(
     - Temporary password generation
     - Hospital-scoped access
     """
-    result = await service.create_staff_user(staff_data.dict())
+    payload = staff_data.model_dump(exclude_none=False)
+    result = await service.create_staff_user(payload)
     return result
 
 

@@ -2,7 +2,7 @@
 Admin schemas for super admin and hospital admin operations.
 """
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 
 # ============================================================================
@@ -120,14 +120,50 @@ class DepartmentStatusUpdate(BaseModel):
 
 
 class StaffCreate(BaseModel):
-    """Staff user creation request"""
+    """Staff user creation request (uses first_name + last_name only)."""
+
     email: EmailStr = Field(..., description="Staff email address")
     phone: str = Field(..., pattern=r'^\+?[\d\s\-\(\)]{10,20}$')
-    first_name: str = Field(..., min_length=2, max_length=100)
-    last_name: str = Field(..., min_length=2, max_length=100)
-    role: str = Field(..., description="Staff role: DOCTOR, NURSE, PHARMACIST, LAB_TECH, RECEPTIONIST")
-    department_name: Optional[str] = Field(None, description="Department name")
+    first_name: str = Field(..., min_length=1, max_length=100)
+    last_name: str = Field(..., min_length=1, max_length=100)
+    role: str = Field(
+        ...,
+        description="DOCTOR, NURSE, PHARMACIST, LAB_TECH, RECEPTIONIST",
+    )
     password: str = Field(..., min_length=8, max_length=128)
+    emergency_contact: Optional[str] = Field(
+        None,
+        pattern=r'^\+?[\d\s\-\(\)]{10,20}$',
+        description="Emergency contact phone (UI)",
+    )
+    shift_timing: Optional[str] = Field(
+        None,
+        max_length=200,
+        description="Shift label, e.g. 'Morning (7AM-3PM)' — mapped to DAY/NIGHT/ROTATING for nurse/receptionist",
+    )
+    joining_date: Optional[str] = Field(
+        None,
+        description="Joining date: DD-MM-YYYY or YYYY-MM-DD",
+    )
+    address: Optional[str] = Field(
+        None,
+        max_length=2000,
+        description="Full postal address (stored in profile metadata)",
+    )
+    doctor_specialization: Optional[str] = Field(
+        None,
+        max_length=255,
+        description="Optional; for doctors defaults to department name",
+    )
+
+    @field_validator("emergency_contact", "joining_date", "address", "shift_timing", mode="before")
+    @classmethod
+    def _empty_optional_to_none(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
 
 class StaffStatusUpdate(BaseModel):

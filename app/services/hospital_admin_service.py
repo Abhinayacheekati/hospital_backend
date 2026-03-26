@@ -58,6 +58,34 @@ def _appointment_is_emergency(appointment: Any) -> bool:
     return (getattr(appointment, "appointment_type", None) or "").strip().upper() == "EMERGENCY"
 
 
+def _shift_type_from_timing(shift_timing: Optional[str]) -> str:
+    """Map free-text shift label to nurse/receptionist shift_type (DAY, NIGHT, ROTATING)."""
+    if not shift_timing:
+        return "DAY"
+    s = str(shift_timing).lower()
+    if "rotat" in s:
+        return "ROTATING"
+    if "night" in s or "evening" in s:
+        return "NIGHT"
+    return "DAY"
+
+
+def _parse_joining_date_iso(raw: Optional[str]) -> Optional[str]:
+    """Return YYYY-MM-DD or None. Accepts DD-MM-YYYY and YYYY-MM-DD."""
+    if not raw or not str(raw).strip():
+        return None
+    s = str(raw).strip()
+    for fmt in ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(s[:10] if len(s) >= 10 else s, fmt).date().isoformat()
+        except ValueError:
+            continue
+    try:
+        return date.fromisoformat(s[:10]).isoformat()
+    except ValueError:
+        return None
+
+
 class HospitalAdminService:
     """Service class for Hospital Admin operations"""
     
@@ -355,12 +383,34 @@ class HospitalAdminService:
     # ============================================================================
     
     async def create_staff_user(self, staff_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a new staff user (Doctor, Lab Tech, Pharmacist)"""
+        """Create staff user and role-specific profile (doctor / nurse / receptionist) when department is set."""
         from app.models.user import User, Role
         from app.models.tenant import Hospital
+        from app.models.hospital import Department
+        from app.models.doctor import DoctorProfile
+        from app.models.nurse import NurseProfile
+        from app.models.receptionist import ReceptionistProfile
         from app.core.enums import UserRole, UserStatus
-        
-        # Enforce hospital email domain policy: staff must use same email domain as hospital
+        from app.services.super_admin_service import generate_staff_id
+        from app.models.user import user_roles
+        from sqlalchemy import insert
+
+        role_name = (staff_data.get("role") or "").strip()
+        if role_name not in [
+            UserRole.DOCTOR,
+            UserRole.NURSE,
+            UserRole.RECEPTIONIST,
+            UserRole.LAB_TECH,
+            UserRole.PHARMACIST,
+        ]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "INVALID_ROLE",
+                    "message": "Role must be DOCTOR, NURSE, RECEPTIONIST, LAB_TECH, or PHARMACIST",
+                },
+            )
+
         hospital_result = await self.db.execute(
             select(Hospital).where(Hospital.id == self.hospital_id)
         )
@@ -379,123 +429,214 @@ class HospitalAdminService:
                         },
                     )
 
-        # Check if email already exists
         existing_user = await self.db.execute(
-            select(User).where(User.email == staff_data['email'])
+            select(User).where(User.email == staff_data["email"])
         )
         if existing_user.scalar_one_or_none():
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail={"code": "EMAIL_EXISTS", "message": "User with this email already exists"}
+                detail={"code": "EMAIL_EXISTS", "message": "User with this email already exists"},
             )
-        
-        # Check if phone already exists
+
         existing_phone = await self.db.execute(
-            select(User).where(User.phone == staff_data['phone'])
+            select(User).where(User.phone == staff_data["phone"])
         )
         if existing_phone.scalar_one_or_none():
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail={"code": "PHONE_EXISTS", "message": "User with this phone already exists"}
+                detail={"code": "PHONE_EXISTS", "message": "User with this phone already exists"},
             )
-        
-        # Validate role
-        role_name = staff_data['role']
-        if role_name not in [UserRole.DOCTOR, UserRole.NURSE, UserRole.RECEPTIONIST, UserRole.LAB_TECH, UserRole.PHARMACIST]:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"code": "INVALID_ROLE", "message": "Role must be DOCTOR, NURSE, RECEPTIONIST, LAB_TECH, or PHARMACIST"}
-            )
-        
-        # Get role from database - DEBUG VERSION
-        print(f"DEBUG: Looking for role: {role_name}")
-        role_result = await self.db.execute(
-            select(Role).where(Role.name == role_name)
-        )
+
+        primary_phone = (staff_data.get("phone") or "").strip()
+        ec = (staff_data.get("emergency_contact") or "").strip()
+        if ec and ec.replace(" ", "") != primary_phone.replace(" ", ""):
+            existing_ec = await self.db.execute(select(User).where(User.phone == ec))
+            if existing_ec.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "PHONE_EXISTS",
+                        "message": "Emergency contact phone is already used by another user",
+                    },
+                )
+
+        role_result = await self.db.execute(select(Role).where(Role.name == role_name))
         role = role_result.scalar_one_or_none()
-        
         if not role:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail={"code": "ROLE_NOT_FOUND", "message": f"Role {role_name} not found"}
+                detail={"code": "ROLE_NOT_FOUND", "message": f"Role {role_name} not found"},
             )
-        
-        # Hash the provided password
-        password_hash = self.security.hash_password(staff_data['password'])
-        
-        # Generate staff ID (will be updated when assigned to department)
-        # For now, use "GENERAL" as default department
-        from app.services.super_admin_service import generate_staff_id
+
+        # Staff is created without department assignment.
+        # Department assignment happens via the separate assign-staff-to-department API.
+        department = None
+        dept_label = "GENERAL"
+
+        joining_iso = _parse_joining_date_iso(staff_data.get("joining_date"))
+        shift_type = _shift_type_from_timing(staff_data.get("shift_timing"))
+        extra_md = dict(staff_data.get("metadata") or {})
+        if ec:
+            extra_md["emergency_contact"] = ec
+        if staff_data.get("shift_timing"):
+            extra_md["shift_timing"] = staff_data["shift_timing"]
+        if joining_iso:
+            extra_md["joining_date"] = joining_iso
+        if staff_data.get("address"):
+            extra_md["address"] = staff_data["address"].strip()
+        # No department info stored at create-time.
+
+        password_hash = self.security.hash_password(staff_data["password"])
         staff_id = generate_staff_id(
             role=role_name,
-            department_name="GENERAL",
-            first_name=staff_data['first_name'],
-            last_name=staff_data['last_name']
+            department_name=dept_label,
+            first_name=staff_data["first_name"],
+            last_name=staff_data["last_name"],
         )
-        
-        # Ensure staff ID is unique
-        existing_staff_id = await self.db.execute(
-            select(User).where(User.staff_id == staff_id)
-        )
+        existing_staff_id = await self.db.execute(select(User).where(User.staff_id == staff_id))
         counter = 1
         original_staff_id = staff_id
         while existing_staff_id.scalar_one_or_none():
-            # If duplicate, increment the number part
             staff_id = original_staff_id[:-2] + f"{counter:02d}"
-            existing_staff_id = await self.db.execute(
-                select(User).where(User.staff_id == staff_id)
-            )
+            existing_staff_id = await self.db.execute(select(User).where(User.staff_id == staff_id))
             counter += 1
-            if counter > 99:  # Safety check
+            if counter > 99:
                 staff_id = original_staff_id[:-2] + f"{random.randint(10, 99)}"
                 break
-        
-        # Create user
+
         user = User(
             id=uuid.uuid4(),
             hospital_id=self.hospital_id,
-            email=staff_data['email'],
-            phone=staff_data['phone'],
+            email=staff_data["email"],
+            phone=staff_data["phone"],
             password_hash=password_hash,
-            first_name=staff_data['first_name'],
-            last_name=staff_data['last_name'],
-            middle_name=staff_data.get('middle_name'),
+            first_name=staff_data["first_name"],
+            last_name=staff_data["last_name"],
+            middle_name=staff_data.get("middle_name"),
             staff_id=staff_id,
             status=UserStatus.ACTIVE,
             email_verified=False,
             phone_verified=False,
-            user_metadata=staff_data.get('metadata', {})
+            user_metadata=extra_md,
         )
-        
         self.db.add(user)
-        await self.db.flush()  # Get user ID
-        
-        # Assign role using direct insert to avoid lazy loading issues
-        from app.models.user import user_roles
-        from sqlalchemy import insert
-        
-        role_assignment = insert(user_roles).values(
-            user_id=user.id,
-            role_id=role.id
+        await self.db.flush()
+
+        await self.db.execute(
+            insert(user_roles).values(user_id=user.id, role_id=role.id)
         )
-        await self.db.execute(role_assignment)
-        
+
+        profiles_created: list[str] = []
+        spec = (staff_data.get("doctor_specialization") or "").strip() or "General"
+
+        if role_name == UserRole.DOCTOR and department:
+            has_doc = await self.db.execute(
+                select(DoctorProfile.id).where(
+                    and_(
+                        DoctorProfile.user_id == user.id,
+                        DoctorProfile.hospital_id == self.hospital_id,
+                    )
+                )
+            )
+            if not has_doc.scalar_one_or_none():
+                doc_ref = user.staff_id or f"DOC{str(uuid.uuid4())[:8].upper()}"
+                lic = f"AUTO-ML-{self.hospital_id.hex[:8]}-{uuid.uuid4().hex[:10]}".upper()
+                self.db.add(
+                    DoctorProfile(
+                        id=uuid.uuid4(),
+                        hospital_id=self.hospital_id,
+                        user_id=user.id,
+                        department_id=department.id,
+                        doctor_id=doc_ref,
+                        medical_license_number=lic,
+                        designation="Staff Physician",
+                        specialization=spec,
+                        sub_specialization=None,
+                        experience_years=0,
+                        qualifications=[],
+                        certifications=[],
+                        medical_associations=[],
+                        consultation_fee=0,
+                        follow_up_fee=None,
+                        is_available_for_emergency=False,
+                        is_accepting_new_patients=True,
+                        bio=None,
+                        languages_spoken=["English"],
+                    )
+                )
+                profiles_created.append("doctor_profile")
+
+        if role_name == UserRole.NURSE and department:
+            has_nurse = await self.db.execute(
+                select(NurseProfile.id).where(
+                    and_(
+                        NurseProfile.user_id == user.id,
+                        NurseProfile.hospital_id == self.hospital_id,
+                    )
+                )
+            )
+            if not has_nurse.scalar_one_or_none():
+                nid = user.staff_id or f"NUR{str(uuid.uuid4())[:8].upper()}"
+                nlic = f"AUTO-NL-{uuid.uuid4().hex[:12]}".upper()
+                self.db.add(
+                    NurseProfile(
+                        id=uuid.uuid4(),
+                        hospital_id=self.hospital_id,
+                        user_id=user.id,
+                        department_id=department.id,
+                        nurse_id=nid,
+                        nursing_license_number=nlic,
+                        designation="Staff Nurse",
+                        specialization=None,
+                        experience_years=0,
+                        shift_type=shift_type,
+                    )
+                )
+                profiles_created.append("nurse_profile")
+
+        if role_name == UserRole.RECEPTIONIST and department:
+            has_rc = await self.db.execute(
+                select(ReceptionistProfile.id).where(
+                    and_(
+                        ReceptionistProfile.user_id == user.id,
+                        ReceptionistProfile.hospital_id == self.hospital_id,
+                    )
+                )
+            )
+            if not has_rc.scalar_one_or_none():
+                rid = user.staff_id or f"RC{str(uuid.uuid4())[:8].upper()}"
+                eid = f"EMP-{uuid.uuid4().hex[:12].upper()}"
+                self.db.add(
+                    ReceptionistProfile(
+                        id=uuid.uuid4(),
+                        hospital_id=self.hospital_id,
+                        user_id=user.id,
+                        department_id=department.id,
+                        receptionist_id=rid,
+                        employee_id=eid,
+                        designation="Front Desk Receptionist",
+                        shift_type=shift_type,
+                    )
+                )
+                profiles_created.append("receptionist_profile")
+
         await self.db.commit()
-        
-        # Generate staff name with appropriate title
+
         staff_name = f"{user.first_name} {user.last_name}"
         if role_name == UserRole.DOCTOR:
             staff_name = f"Dr. {staff_name}"
         elif role_name == UserRole.NURSE:
             staff_name = f"Nurse {staff_name}"
-        
+
         return {
             "user_id": str(user.id),
             "staff_id": user.staff_id,
             "staff_name": staff_name,
             "email": user.email,
             "role": role_name,
-            "message": f"{role_name.replace('_', ' ').title()} created successfully"
+            "joining_date": joining_iso,
+            "profiles_created": profiles_created,
+            "message": f"{role_name.replace('_', ' ').title()} created successfully",
         }
     
     async def get_staff_users(
@@ -4106,7 +4247,9 @@ class HospitalAdminService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "STAFF_NOT_FOUND", "message": f"Staff member '{staff_name}' not found in this hospital"}
             )
-        
+
+        staff_roles = [role.name for role in staff_member.roles]
+
         # Find department by name
         department = await self._get_department_by_name(department_name)
         if not department:
@@ -4144,8 +4287,6 @@ class HospitalAdminService:
 
         # Update staff ID with actual department name if this is primary assignment
         if is_primary:
-            # Get staff member's role
-            staff_roles = [role.name for role in staff_member.roles]
             staff_role = None
             for role in [UserRole.DOCTOR, UserRole.NURSE, UserRole.RECEPTIONIST, UserRole.PHARMACIST, UserRole.LAB_TECH]:
                 if role in staff_roles:
@@ -4303,12 +4444,80 @@ class HospitalAdminService:
                 self.db.add(minimal_profile)
                 doctor_profile_created = True
 
+        nurse_profile_created = False
+        receptionist_profile_created = False
+        from app.models.nurse import NurseProfile
+        from app.models.receptionist import ReceptionistProfile
+
+        md = dict(staff_member.user_metadata or {})
+        md["department_id"] = str(department.id)
+        md["department_name"] = department.name
+        staff_member.user_metadata = md
+
+        shift_type = _shift_type_from_timing(md.get("shift_timing"))
+
+        if UserRole.NURSE in staff_roles:
+            existing_nurse = await self.db.execute(
+                select(NurseProfile.id).where(
+                    and_(
+                        NurseProfile.user_id == staff_member.id,
+                        NurseProfile.hospital_id == self.hospital_id,
+                    )
+                )
+            )
+            if not existing_nurse.scalar_one_or_none():
+                nid = staff_member.staff_id or f"NUR{str(uuid.uuid4())[:8].upper()}"
+                nlic = f"AUTO-NL-{uuid.uuid4().hex[:12]}".upper()
+                self.db.add(
+                    NurseProfile(
+                        id=uuid.uuid4(),
+                        hospital_id=self.hospital_id,
+                        user_id=staff_member.id,
+                        department_id=department.id,
+                        nurse_id=nid,
+                        nursing_license_number=nlic,
+                        designation="Staff Nurse",
+                        specialization=department.name,
+                        experience_years=0,
+                        shift_type=shift_type,
+                    )
+                )
+                nurse_profile_created = True
+
+        if UserRole.RECEPTIONIST in staff_roles:
+            existing_rc = await self.db.execute(
+                select(ReceptionistProfile.id).where(
+                    and_(
+                        ReceptionistProfile.user_id == staff_member.id,
+                        ReceptionistProfile.hospital_id == self.hospital_id,
+                    )
+                )
+            )
+            if not existing_rc.scalar_one_or_none():
+                rid = staff_member.staff_id or f"RC{str(uuid.uuid4())[:8].upper()}"
+                eid = f"EMP-{uuid.uuid4().hex[:12].upper()}"
+                self.db.add(
+                    ReceptionistProfile(
+                        id=uuid.uuid4(),
+                        hospital_id=self.hospital_id,
+                        user_id=staff_member.id,
+                        department_id=department.id,
+                        receptionist_id=rid,
+                        employee_id=eid,
+                        designation="Front Desk Receptionist",
+                        shift_type=shift_type,
+                    )
+                )
+                receptionist_profile_created = True
+
         await self.db.commit()
         
         return {
             "staff_name": staff_name,
             "department_name": department_name,
             "doctor_profile_created": doctor_profile_created,
+            "nurse_profile_created": nurse_profile_created,
+            "receptionist_profile_created": receptionist_profile_created,
             "message": f"Staff member '{staff_name}' assigned to department '{department_name}' successfully"
         }
     
