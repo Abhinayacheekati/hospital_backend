@@ -3,7 +3,7 @@ Application configuration settings.
 Manages environment variables and application settings.
 """
 from pydantic_settings import BaseSettings
-from pydantic import Field, model_validator
+from pydantic import Field, model_validator, field_validator
 from typing import Optional
 import os
 import logging
@@ -63,7 +63,29 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     
     # CORS
-    ALLOWED_ORIGINS: list = ["http://localhost:3000", "http://localhost:8080"]
+    # Accepts either:
+    # - comma-separated string via env, e.g. https://a.com,https://b.com
+    # - or JSON-ish list parsing supported by Pydantic if provided as a list.
+    ALLOWED_ORIGINS: list[str] = Field(
+        default_factory=lambda: ["http://localhost:3000", "http://localhost:8080"],
+        env="ALLOWED_ORIGINS",
+    )
+
+    @field_validator("ALLOWED_ORIGINS", mode="before")
+    @classmethod
+    def _parse_allowed_origins(cls, v):
+        if v is None:
+            return ["http://localhost:3000", "http://localhost:8080"]
+        if isinstance(v, str):
+            raw = v.strip()
+            if not raw:
+                return ["http://localhost:3000", "http://localhost:8080"]
+            # Allow user to pass '*' but note: allow_credentials=True in main.py.
+            # So do not recommend '*' unless you also set allow_credentials=False.
+            if raw == "*":
+                return ["*"]
+            return [item.strip() for item in raw.split(",") if item.strip()]
+        return v
 
     # Public URL of this backend (used to generate links sent to frontend/emails).
     # Set this to your Render URL, e.g. https://hospital-backend-9mg3.onrender.com
