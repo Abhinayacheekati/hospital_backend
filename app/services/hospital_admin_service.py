@@ -826,6 +826,9 @@ class HospitalAdminService:
             "department": department_name,
             "hire_date": joining,
             "shift_timing": shift_timing,
+            "address": md.get("address"),
+            "emergency_contact": md.get("emergency_contact"),
+            "specialization": profile_info.get("specialization") if primary_role == UserRole.DOCTOR else None,
             "status": user.status,
             "is_active": user.is_active,
             "email_verified": user.email_verified,
@@ -881,21 +884,29 @@ class HospitalAdminService:
         user.is_active = is_active
         user.updated_at = datetime.utcnow()
         
-        # If deactivating, also update user status
+        # Mirror super-admin convention: deactivated accounts use BLOCKED (no UserStatus.INACTIVE).
         if not is_active:
-            user.status = UserStatus.INACTIVE
+            user.status = UserStatus.BLOCKED.value
         else:
-            user.status = UserStatus.ACTIVE
+            user.status = UserStatus.ACTIVE.value
         
         await self.db.commit()
         
         status_text = "activated" if is_active else "deactivated"
+        status_str = (
+            user.status
+            if isinstance(user.status, str)
+            else getattr(user.status, "value", str(user.status))
+        )
         
         return {
             "user_id": str(user.id),
-            "old_status": old_status,
-            "new_status": is_active,
-            "message": f"Staff user {status_text} successfully"
+            "staff_id": user.staff_id,
+            "is_active": user.is_active,
+            "status": status_str,
+            "old_is_active": old_status,
+            "new_is_active": is_active,
+            "message": f"Staff user {status_text} successfully",
         }
     
     async def reset_staff_password(self, staff_id: uuid.UUID) -> Dict[str, Any]:
@@ -1854,11 +1865,10 @@ class HospitalAdminService:
         patient.user.is_active = is_active
         patient.user.updated_at = datetime.utcnow()
         
-        # If deactivating, also update user status
         if not is_active:
-            patient.user.status = UserStatus.INACTIVE
+            patient.user.status = UserStatus.BLOCKED.value
         else:
-            patient.user.status = UserStatus.ACTIVE
+            patient.user.status = UserStatus.ACTIVE.value
         
         await self.db.commit()
         
@@ -1869,6 +1879,9 @@ class HospitalAdminService:
             "patient_name": f"{patient.user.first_name} {patient.user.last_name}",
             "old_status": old_status,
             "new_status": is_active,
+            "status": patient.user.status
+            if isinstance(patient.user.status, str)
+            else getattr(patient.user.status, "value", str(patient.user.status)),
             "message": f"Patient account {status_text} successfully",
             "notice": "This action affects account access only. Medical records remain unchanged."
         }

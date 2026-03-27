@@ -663,6 +663,10 @@ class StaffDetailsOut(BaseModel):
     hire_date: Optional[str] = None
     shift_timing: Optional[str] = None
     last_login: Optional[str] = None
+    address: Optional[str] = None
+    emergency_contact: Optional[str] = None
+    # Doctor specialization is shown in the staff UI as "Doctor Specialization"
+    specialization: Optional[str] = None
     created_at: str
     updated_at: str
 
