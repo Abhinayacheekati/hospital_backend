@@ -650,7 +650,15 @@ class HospitalAdminService:
         from app.models.user import User, Role
         
         offset = (page - 1) * limit
-        
+
+        staff_role_names = [
+            UserRole.DOCTOR,
+            UserRole.NURSE,
+            UserRole.RECEPTIONIST,
+            UserRole.LAB_TECH,
+            UserRole.PHARMACIST,
+        ]
+
         # Build query with hospital filter
         query = select(User).options(
             selectinload(User.roles)
@@ -660,22 +668,17 @@ class HospitalAdminService:
         if role_filter:
             query = query.join(User.roles).where(Role.name == role_filter)
         else:
-            # Only show staff roles (exclude patients and admins)
-            query = query.join(User.roles).where(
-                Role.name.in_([UserRole.DOCTOR, UserRole.NURSE, UserRole.RECEPTIONIST, UserRole.LAB_TECH, UserRole.PHARMACIST])
-            )
+            query = query.join(User.roles).where(Role.name.in_(staff_role_names))
         
         if active_only:
             query = query.where(User.is_active == True)
         
-        # Get total count
+        # Get total count (same role filter as list query)
         count_query = select(func.count(User.id)).where(User.hospital_id == self.hospital_id)
         if role_filter:
             count_query = count_query.join(User.roles).where(Role.name == role_filter)
         else:
-            count_query = count_query.join(User.roles).where(
-                Role.name.in_([UserRole.DOCTOR, UserRole.LAB_TECH, UserRole.PHARMACIST])
-            )
+            count_query = count_query.join(User.roles).where(Role.name.in_(staff_role_names))
         if active_only:
             count_query = count_query.where(User.is_active == True)
         
@@ -691,7 +694,12 @@ class HospitalAdminService:
         staff_list = []
         for user in users:
             user_roles = [role.name for role in user.roles]
-            primary_role = next((role for role in user_roles if role in [UserRole.DOCTOR, UserRole.LAB_TECH, UserRole.PHARMACIST]), None)
+            primary_role = next(
+                (r for r in staff_role_names if r in user_roles),
+                None,
+            )
+            md = user.user_metadata or {}
+            joining = md.get("joining_date")
             
             # Generate staff name with appropriate title
             staff_name = f"{user.first_name} {user.last_name}"
@@ -710,7 +718,11 @@ class HospitalAdminService:
                 "last_name": user.last_name,
                 "middle_name": user.middle_name,
                 "primary_role": primary_role,
+                "role": primary_role or "",
                 "all_roles": user_roles,
+                "shift_timing": md.get("shift_timing"),
+                "hire_date": joining,
+                "joining_date": joining,
                 "status": user.status,
                 "is_active": user.is_active,
                 "email_verified": user.email_verified,
@@ -753,35 +765,53 @@ class HospitalAdminService:
                 detail={"code": "STAFF_NOT_FOUND", "message": "Staff user not found"}
             )
         
-        # Check if user has staff role
         user_roles = [role.name for role in user.roles]
-        staff_roles = [UserRole.DOCTOR, UserRole.LAB_TECH, UserRole.PHARMACIST]
-        if not any(role in staff_roles for role in user_roles):
+        staff_role_names = [
+            UserRole.DOCTOR,
+            UserRole.NURSE,
+            UserRole.RECEPTIONIST,
+            UserRole.LAB_TECH,
+            UserRole.PHARMACIST,
+        ]
+        if not any(role in staff_role_names for role in user_roles):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "NOT_STAFF_USER", "message": "User is not a staff member"}
             )
-        
-        primary_role = next((role for role in user_roles if role in staff_roles), None)
-        
-        # Get additional profile information based on role
+
+        primary_role = next(
+            (r for r in staff_role_names if r in user_roles),
+            None,
+        )
+        md = user.user_metadata or {}
+        joining = md.get("joining_date")
+        shift_timing = md.get("shift_timing")
+        dept_raw = md.get("department") or md.get("department_name")
+        department_name = (str(dept_raw).strip() if dept_raw else None) or None
+
         profile_info = {}
         if primary_role == UserRole.DOCTOR:
-            # Get doctor profile if exists
-            from app.models.doctor import DoctorProfile
             doctor_result = await self.db.execute(
-                select(DoctorProfile).where(DoctorProfile.user_id == staff_id)
+                select(DoctorProfile)
+                .options(selectinload(DoctorProfile.department))
+                .where(DoctorProfile.user_id == staff_id)
             )
             doctor_profile = doctor_result.scalar_one_or_none()
             if doctor_profile:
+                if getattr(doctor_profile, "department", None) and doctor_profile.department.name:
+                    department_name = doctor_profile.department.name
                 profile_info = {
                     "doctor_id": doctor_profile.doctor_id,
                     "medical_license_number": doctor_profile.medical_license_number,
                     "designation": doctor_profile.designation,
                     "specialization": doctor_profile.specialization,
                     "experience_years": doctor_profile.experience_years,
-                    "consultation_fee": float(doctor_profile.consultation_fee) if doctor_profile.consultation_fee else None
+                    "consultation_fee": float(doctor_profile.consultation_fee)
+                    if doctor_profile.consultation_fee
+                    else None,
                 }
+
+        role_str = primary_role or ""
         
         return {
             "id": str(user.id),
@@ -791,7 +821,11 @@ class HospitalAdminService:
             "last_name": user.last_name,
             "middle_name": user.middle_name,
             "primary_role": primary_role,
+            "role": role_str,
             "all_roles": user_roles,
+            "department": department_name,
+            "hire_date": joining,
+            "shift_timing": shift_timing,
             "status": user.status,
             "is_active": user.is_active,
             "email_verified": user.email_verified,
@@ -829,8 +863,14 @@ class HospitalAdminService:
         
         # Check if user has staff role
         user_roles = [role.name for role in user.roles]
-        staff_roles = [UserRole.DOCTOR, UserRole.LAB_TECH, UserRole.PHARMACIST]
-        if not any(role in staff_roles for role in user_roles):
+        staff_role_names = [
+            UserRole.DOCTOR,
+            UserRole.NURSE,
+            UserRole.RECEPTIONIST,
+            UserRole.LAB_TECH,
+            UserRole.PHARMACIST,
+        ]
+        if not any(role in staff_role_names for role in user_roles):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "NOT_STAFF_USER", "message": "User is not a staff member"}
@@ -879,10 +919,15 @@ class HospitalAdminService:
                 detail={"code": "STAFF_NOT_FOUND", "message": "Staff user not found"}
             )
         
-        # Check if user has staff role
         user_roles = [role.name for role in user.roles]
-        staff_roles = [UserRole.DOCTOR, UserRole.LAB_TECH, UserRole.PHARMACIST]
-        if not any(role in staff_roles for role in user_roles):
+        staff_role_names = [
+            UserRole.DOCTOR,
+            UserRole.NURSE,
+            UserRole.RECEPTIONIST,
+            UserRole.LAB_TECH,
+            UserRole.PHARMACIST,
+        ]
+        if not any(role in staff_role_names for role in user_roles):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "NOT_STAFF_USER", "message": "User is not a staff member"}

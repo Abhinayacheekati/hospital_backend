@@ -67,7 +67,11 @@ class Settings(BaseSettings):
     # - comma-separated string via env, e.g. https://a.com,https://b.com
     # - or JSON-ish list parsing supported by Pydantic if provided as a list.
     ALLOWED_ORIGINS: list[str] = Field(
-        default_factory=lambda: ["http://localhost:3000", "http://localhost:8080"],
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://localhost:3001",
+            "http://localhost:8080",
+        ],
         env="ALLOWED_ORIGINS",
     )
 
@@ -75,11 +79,19 @@ class Settings(BaseSettings):
     @classmethod
     def _parse_allowed_origins(cls, v):
         if v is None:
-            return ["http://localhost:3000", "http://localhost:8080"]
+            return [
+                "http://localhost:3000",
+                "http://localhost:3001",
+                "http://localhost:8080",
+            ]
         if isinstance(v, str):
             raw = v.strip()
             if not raw:
-                return ["http://localhost:3000", "http://localhost:8080"]
+                return [
+                    "http://localhost:3000",
+                    "http://localhost:3001",
+                    "http://localhost:8080",
+                ]
             # Allow user to pass '*' but note: allow_credentials=True in main.py.
             # So do not recommend '*' unless you also set allow_credentials=False.
             if raw == "*":

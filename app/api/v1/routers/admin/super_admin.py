@@ -15,7 +15,8 @@ from app.core.enums import UserRole, UserStatus, HospitalStatus
 from app.schemas.admin import (
     HospitalUpdate, AdminStatusUpdate, HospitalStatusUpdate,
     HospitalAdminCreate, SubscriptionPlanCreate, SubscriptionPlanUpdate,
-    PlanAssignmentCreate, HospitalListOut, HospitalDetailsOut
+    PlanAssignmentCreate, HospitalListOut, HospitalDetailsOut,
+    SuperAdminUserUpdate, SuperAdminUserStatusUpdate
 )
 
 router = APIRouter(prefix="/super-admin")
@@ -308,6 +309,80 @@ async def reset_admin_password(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"code": "INVALID_ADMIN_ID", "message": "Invalid administrator ID format"})
     result = await service.reset_admin_password(admin_uuid)
     return result
+
+
+# ============================================================================
+# SUPER ADMIN - USER ACCOUNTS (NO POST CREATE)
+# ============================================================================
+
+@router.get("/users", tags=["Super Admin - User Accounts"])
+async def get_all_users(
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int = Query(50, ge=1, le=100, description="Items per page"),
+    current_user: User = Depends(require_super_admin()),
+    service: SuperAdminService = Depends(get_super_admin_service),
+):
+    """
+    Get all hospital administrator users with their hospital details.
+    """
+    return await service.get_super_admin_users(page=page, limit=limit)
+
+
+@router.put("/users/{user_id}", tags=["Super Admin - User Accounts"])
+@router.patch("/users/{user_id}", tags=["Super Admin - User Accounts"])
+async def update_user(
+    user_id: str,
+    payload: SuperAdminUserUpdate,
+    current_user: User = Depends(require_super_admin()),
+    service: SuperAdminService = Depends(get_super_admin_service),
+):
+    """
+    Update an existing hospital admin user + its hospital details.
+    Note: admin_password is intentionally not supported here (POST create removed).
+    """
+    try:
+        uid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_USER_ID", "message": "Invalid user ID format"},
+        )
+    return await service.update_super_admin_user(uid, payload.model_dump())
+
+
+@router.patch("/users/{user_id}/status", tags=["Super Admin - User Accounts"])
+async def toggle_user_status(
+    user_id: str,
+    payload: SuperAdminUserStatusUpdate,
+    current_user: User = Depends(require_super_admin()),
+    service: SuperAdminService = Depends(get_super_admin_service),
+):
+    """Toggle hospital admin ACTIVE / INACTIVE (INACTIVE maps to BLOCKED)."""
+    try:
+        uid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_USER_ID", "message": "Invalid user ID format"},
+        )
+    return await service.set_super_admin_user_status(uid, payload.status)
+
+
+@router.delete("/users/{user_id}", tags=["Super Admin - User Accounts"])
+async def delete_user(
+    user_id: str,
+    current_user: User = Depends(require_super_admin()),
+    service: SuperAdminService = Depends(get_super_admin_service),
+):
+    """Soft delete hospital admin user (sets status to BLOCKED)."""
+    try:
+        uid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_USER_ID", "message": "Invalid user ID format"},
+        )
+    return await service.delete_super_admin_user(uid)
 
 
 # ============================================================================
