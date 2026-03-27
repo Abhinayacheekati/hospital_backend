@@ -528,6 +528,9 @@ class HospitalAdminService:
 
         profiles_created: list[str] = []
         spec = (staff_data.get("doctor_specialization") or "").strip() or "General"
+        if role_name == UserRole.DOCTOR:
+            extra_md["doctor_specialization"] = spec
+            user.user_metadata = extra_md
 
         if role_name == UserRole.DOCTOR and department:
             has_doc = await self.db.execute(
@@ -812,6 +815,13 @@ class HospitalAdminService:
                 }
 
         role_str = primary_role or ""
+        specialization = None
+        if primary_role == UserRole.DOCTOR:
+            specialization = (
+                profile_info.get("specialization")
+                or md.get("doctor_specialization")
+                or md.get("specialization")
+            )
         
         return {
             "id": str(user.id),
@@ -828,7 +838,7 @@ class HospitalAdminService:
             "shift_timing": shift_timing,
             "address": md.get("address"),
             "emergency_contact": md.get("emergency_contact"),
-            "specialization": profile_info.get("specialization") if primary_role == UserRole.DOCTOR else None,
+            "specialization": specialization,
             "status": user.status,
             "is_active": user.is_active,
             "email_verified": user.email_verified,
