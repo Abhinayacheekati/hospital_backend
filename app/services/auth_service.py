@@ -609,7 +609,7 @@ class AuthService:
             return
 
         from app.models.tenant import HospitalSubscription, Hospital
-        from datetime import datetime as _dt
+        from datetime import datetime as _dt, timezone as _tz
 
         hosp_result = await self.db.execute(
             select(Hospital).where(Hospital.id == user.hospital_id)
@@ -637,15 +637,23 @@ class AuthService:
                 },
             )
 
-        now = _dt.utcnow()
-        if subscription.end_date and subscription.end_date < now:
-            raise HTTPException(
-                status_code=status.HTTP_402_PAYMENT_REQUIRED,
-                detail={
-                    "code": "SUBSCRIPTION_EXPIRED",
-                    "message": f"Subscription expired on {subscription.end_date.strftime('%Y-%m-%d')}. Renew to continue.",
-                },
-            )
+        # Compare timestamps safely (timezone-aware vs naive).
+        # DB DateTime(timezone=True) may return aware datetimes; older rows may be naive.
+        now = _dt.now(_tz.utc)
+        if subscription.end_date:
+            end_dt = subscription.end_date
+            if getattr(end_dt, "tzinfo", None) is None:
+                end_dt = end_dt.replace(tzinfo=_tz.utc)
+            else:
+                end_dt = end_dt.astimezone(_tz.utc)
+            if end_dt < now:
+                raise HTTPException(
+                    status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                    detail={
+                        "code": "SUBSCRIPTION_EXPIRED",
+                        "message": f"Subscription expired on {end_dt.strftime('%Y-%m-%d')}. Renew to continue.",
+                    },
+                )
 
         if subscription.status in (SubscriptionStatus.SUSPENDED, SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED):
             status_str = str(subscription.status)
