@@ -243,44 +243,70 @@ class HospitalAdminService:
                 detail={"code": "DEPARTMENT_NOT_FOUND", "message": "Department not found"}
             )
         
-        # Get department statistics (placeholder for now)
-        # TODO: Add actual statistics like doctor count, patient count, etc.
-        
-        head_doctor_info = None
+        # IMPORTANT: This endpoint is bound to response_model=DepartmentDetailsOut.
+        # That schema requires fields like staff_count/current_bed_occupancy/etc.
+        settings = department.settings or {}
+
+        head_name = None
         if department.head_doctor:
-            head_doctor_info = {
-                "id": str(department.head_doctor.id),
-                "name": f"{department.head_doctor.first_name} {department.head_doctor.last_name}",
-                "email": department.head_doctor.email,
-                "phone": department.head_doctor.phone
-            }
-        
+            head_name = f"{department.head_doctor.first_name} {department.head_doctor.last_name}".strip()
+
+        # Operating hours: best-effort formatting from opening/closing/is_24x7.
+        operating_hours = None
+        if getattr(department, "is_24x7", False):
+            operating_hours = "24x7"
+        else:
+            opening = getattr(department, "opening_time", None)
+            closing = getattr(department, "closing_time", None)
+            if opening and closing:
+                operating_hours = f"{opening.strftime('%H:%M')} - {closing.strftime('%H:%M')}"
+
+        # Staff count: count staff profiles mapped to this department (cheap + stable).
+        try:
+            from sqlalchemy import func
+            from app.models.hospital import StaffProfile
+
+            staff_count_result = await self.db.execute(
+                select(func.count(StaffProfile.id)).where(
+                    and_(
+                        StaffProfile.hospital_id == self.hospital_id,
+                        StaffProfile.department_id == department.id,
+                        StaffProfile.is_active == True,
+                    )
+                )
+            )
+            staff_count = int(staff_count_result.scalar() or 0)
+        except Exception:
+            staff_count = 0
+
+        # Bed occupancy: not modeled per-department in v1 -> keep 0 but present.
+        current_bed_occupancy = int(settings.get("current_bed_occupancy") or 0)
+
         return {
             "id": str(department.id),
             "name": department.name,
-            "code": department.code,
             "description": department.description,
+            "head_of_department": head_name,
             "location": department.location,
             "phone": department.phone,
             "email": department.email,
-            "is_emergency": department.is_emergency,
-            "is_icu": department.is_icu,
+            "operating_hours": operating_hours,
             "bed_capacity": department.bed_capacity,
-            "is_24x7": department.is_24x7,
-            "is_active": department.is_active,
-            "settings": department.settings,
-            "head_doctor": head_doctor_info,
+            "current_bed_occupancy": current_bed_occupancy,
+            "staff_count": staff_count,
+            "specializations": list(settings.get("specializations") or []),
+            "equipment_list": list(settings.get("equipment_list") or []),
+            "emergency_services": bool(getattr(department, "is_emergency", False)),
+            "is_active": bool(department.is_active),
             "created_at": department.created_at.isoformat(),
             "updated_at": department.updated_at.isoformat(),
-            "statistics": {
-                "doctor_count": 0,  # TODO: Implement actual counts
-                "patient_count": 0,
-                "active_appointments": 0
-            }
+            # Extras kept for backward compatibility (ignored by response_model)
+            "code": department.code,
         }
     
     async def update_department(self, department_id: uuid.UUID, update_data: Dict[str, Any]) -> Dict[str, Any]:
         """Update department information"""
+        from sqlalchemy import func
         # Get department
         result = await self.db.execute(
             select(Department).where(
@@ -304,7 +330,7 @@ class HospitalAdminService:
                 select(Department).where(
                     and_(
                         Department.hospital_id == self.hospital_id,
-                        Department.code == update_data["code"],
+                        func.lower(Department.code) == str(update_data["code"]).strip().lower(),
                         Department.id != department_id
                     )
                 )
@@ -315,9 +341,9 @@ class HospitalAdminService:
                     detail={"code": "DEPARTMENT_CODE_EXISTS", "message": "Department with this code already exists"}
                 )
         
-        # Validate head doctor if being changed
-        if "head_doctor_name" in update_data:
-            head_doctor_name = update_data["head_doctor_name"]
+        # API uses head_of_department; store to head_doctor_id.
+        if "head_of_department" in update_data:
+            head_doctor_name = update_data["head_of_department"]
             if head_doctor_name:
                 head_doctor = await self._get_hospital_doctor_by_name(head_doctor_name)
                 if not head_doctor:
@@ -330,7 +356,7 @@ class HospitalAdminService:
             else:
                 update_data["head_doctor_id"] = None
             # Remove the name field since we're using ID internally
-            del update_data["head_doctor_name"]
+            del update_data["head_of_department"]
         
         # Update fields
         for field, value in update_data.items():
