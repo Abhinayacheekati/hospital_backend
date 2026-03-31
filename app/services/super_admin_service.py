@@ -838,6 +838,7 @@ class SuperAdminService:
     ) -> Dict[str, Any]:
         """Assign a subscription plan to a hospital"""
         from app.models.tenant import SubscriptionPlanModel, HospitalSubscription
+        from datetime import timezone as _tz
         
         # Verify hospital exists
         hospital = await self._get_hospital_by_id(hospital_id)
@@ -865,11 +866,19 @@ class SuperAdminService:
         
         # Calculate dates with proper format handling
         start_date = parse_date_string(assignment_data.get('start_date')) or datetime.utcnow()
+        if getattr(start_date, "tzinfo", None) is None:
+            start_date = start_date.replace(tzinfo=_tz.utc)
+        else:
+            start_date = start_date.astimezone(_tz.utc)
         if assignment_data.get('end_date'):
             end_date = parse_date_string(assignment_data['end_date'])
         else:
             # Default to 1 year from start date
             end_date = start_date.replace(year=start_date.year + 1)
+        if getattr(end_date, "tzinfo", None) is None:
+            end_date = end_date.replace(tzinfo=_tz.utc)
+        else:
+            end_date = end_date.astimezone(_tz.utc)
         
         if current_subscription:
             # Update existing subscription
