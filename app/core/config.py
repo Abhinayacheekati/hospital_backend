@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000", "http://localhost:8080"],
         env="ALLOWED_ORIGINS",
+        # added
     )
 
     @field_validator("ALLOWED_ORIGINS", mode="before")
