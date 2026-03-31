@@ -77,6 +77,7 @@ class Settings(BaseSettings):
             "https://hospital-management-12.vercel.app",
         ],
         env="ALLOWED_ORIGINS",
+        # added
     )
 
     @field_validator("ALLOWED_ORIGINS", mode="before")
