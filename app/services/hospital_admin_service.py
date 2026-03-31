@@ -227,6 +227,17 @@ class HospitalAdminService:
             head_doctor_name = None
             if dept.head_doctor:
                 head_doctor_name = f"{dept.head_doctor.first_name} {dept.head_doctor.last_name}"
+
+            settings = dept.settings or {}
+
+            operating_hours = None
+            if getattr(dept, "is_24x7", False):
+                operating_hours = "24x7"
+            else:
+                opening = getattr(dept, "opening_time", None)
+                closing = getattr(dept, "closing_time", None)
+                if opening and closing:
+                    operating_hours = f"{opening.strftime('%H:%M')} - {closing.strftime('%H:%M')}"
             
             department_list.append({
                 "id": str(dept.id),
@@ -241,7 +252,16 @@ class HospitalAdminService:
                 "bed_capacity": dept.bed_capacity,
                 "is_24x7": dept.is_24x7,
                 "is_active": dept.is_active,
+                # Frontend expects one of these keys for the "Head" line.
+                # Keep backward compatibility by returning all.
                 "head_doctor_name": head_doctor_name,
+                "head_of_department": head_doctor_name,
+                "head": head_doctor_name,
+                # Include details so frontend can render without extra call
+                "operating_hours": operating_hours,
+                "specializations": list(settings.get("specializations") or []),
+                "equipment_list": list(settings.get("equipment_list") or []),
+                "emergency_services": bool(getattr(dept, "is_emergency", False)),
                 "created_at": dept.created_at.isoformat(),
                 "updated_at": dept.updated_at.isoformat()
             })
