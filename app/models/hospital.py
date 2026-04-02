@@ -214,3 +214,6 @@ class Bed(TenantBaseModel):
     
     def __repr__(self):
         return f"<Bed(id={self.id}, code='{self.bed_code}', status='{self.status}', ward_id={self.ward_id})>"
+    
+
+    #123
