@@ -26,6 +26,49 @@ logger = logging.getLogger(__name__)
 _SAFE_DB_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
 
+def tenant_provision_http_detail(exc: BaseException, *, reactivate: bool = False) -> dict:
+    """Structured API error so deploys (e.g. Render) see the real Postgres message + fix hint."""
+    cause = (str(exc) or type(exc).__name__).strip()
+    if len(cause) > 900:
+        cause = cause[:900] + "…"
+
+    low = cause.lower()
+    hint: Optional[str] = None
+    if any(
+        m in low
+        for m in (
+            "permission denied",
+            "insufficient_privilege",
+            "must be superuser",
+            "only superusers",
+        )
+    ):
+        hint = (
+            "This database role usually cannot CREATE DATABASE on managed providers (e.g. Render). "
+            "Set TENANT_DB_AUTO_PROVISION=false in your web service environment and redeploy; "
+            "hospitals use the shared database only (no per-hospital DB)."
+        )
+    elif "does not exist" in low and "database" in low:
+        hint = (
+            "Wrong or missing database for the admin connection. On Render, leave TENANT_DB_ADMIN_DATABASE "
+            "unset so the database name from DATABASE_URL is used, or set TENANT_DB_AUTO_PROVISION=false."
+        )
+
+    msg = (
+        "Hospital reactivated but no new tenant database could be created."
+        if reactivate
+        else "Could not create dedicated database for this hospital."
+    )
+    out: dict = {
+        "code": "TENANT_DB_PROVISION_FAILED",
+        "message": msg,
+        "postgres_error": cause,
+    }
+    if hint:
+        out["hint"] = hint
+    return out
+
+
 def tenant_db_name_for_hospital(hospital_id) -> str:
     """Deterministic DB name: prefix + 32-char hex (no hyphens)."""
     prefix = (settings.TENANT_DB_NAME_PREFIX or "hosp_").strip().lower()
@@ -39,13 +82,19 @@ def tenant_db_name_for_hospital(hospital_id) -> str:
 
 
 def _admin_sync_url() -> str:
-    """Sync URL connected to maintenance DB (postgres) for CREATE DATABASE."""
+    """
+    Sync URL for the session used to run CREATE DATABASE.
+
+    Render (and similar) only allow connecting to your *assigned* database, not `postgres`.
+    Leave TENANT_DB_ADMIN_DATABASE empty to reuse the database name from DATABASE_URL_SYNC.
+    """
     sync = (settings.DATABASE_URL_SYNC or "").strip()
     if not sync:
         raise RuntimeError("DATABASE_URL_SYNC is required for tenant DB provisioning")
     u = make_url(sync)
-    # connect to default maintenance database
-    maint = settings.TENANT_DB_ADMIN_DATABASE or "postgres"
+    maint = (settings.TENANT_DB_ADMIN_DATABASE or "").strip()
+    if not maint:
+        maint = u.database or "postgres"
     u = u.set(database=maint)
     return u.render_as_string(hide_password=False)
 

@@ -57,7 +57,10 @@ class Settings(BaseSettings):
     TENANT_DB_AUTO_PROVISION: bool = Field(
         default=True,
         env="TENANT_DB_AUTO_PROVISION",
-        description="When True, Super Admin create_hospital runs CREATE DATABASE on the same Postgres instance",
+        description=(
+            "When True, create_hospital runs CREATE DATABASE per tenant. "
+            "Managed Postgres (Render, Neon, RDS, etc.) usually denies CREATEDB—set false and use one database."
+        ),
     )
     TENANT_DB_NAME_PREFIX: str = Field(
         default="hosp_",
@@ -70,9 +73,13 @@ class Settings(BaseSettings):
         description="Optional: clone new tenant DBs from this template (prepare once with schema)",
     )
     TENANT_DB_ADMIN_DATABASE: str = Field(
-        default="postgres",
+        default="",
         env="TENANT_DB_ADMIN_DATABASE",
-        description="Maintenance DB used for CREATE DATABASE (usually postgres)",
+        description=(
+            "Database to connect to when running CREATE DATABASE. "
+            "Empty: use the DB name from DATABASE_URL (needed for Render—you only have one DB). "
+            "Self-hosted: set to postgres if your role connects via the postgres database."
+        ),
     )
     TENANT_DB_ROUTE_QUERIES: bool = Field(
         default=True,

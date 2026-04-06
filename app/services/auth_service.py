@@ -169,6 +169,7 @@ class AuthService:
                         bootstrap_tenant_database,
                         tenant_db_name_for_hospital,
                         provision_postgres_database,
+                        tenant_provision_http_detail,
                     )
 
                     used_template = bool((settings.TENANT_TEMPLATE_DATABASE or "").strip())
@@ -179,10 +180,7 @@ class AuthService:
                         logger.exception("Tenant DB provision failed on reactivation")
                         raise HTTPException(
                             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                            detail={
-                                "code": "TENANT_DB_PROVISION_FAILED",
-                                "message": "Hospital reactivated but dedicated database could not be created. Check Postgres CREATEDB permission and TENANT_TEMPLATE_DATABASE.",
-                            },
+                            detail=tenant_provision_http_detail(e, reactivate=True),
                         ) from e
                     existing_hospital.tenant_database_name = tdb
                     await self.db.flush()
@@ -213,6 +211,7 @@ class AuthService:
             from app.services.tenant_database_provisioning import (
                 tenant_db_name_for_hospital,
                 provision_postgres_database,
+                tenant_provision_http_detail,
             )
 
             tenant_db = tenant_db_name_for_hospital(hospital_id)
@@ -222,10 +221,7 @@ class AuthService:
                 logger.exception("Tenant DB provision failed on create_hospital")
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail={
-                        "code": "TENANT_DB_PROVISION_FAILED",
-                        "message": "Could not create dedicated database for this hospital. Ensure the DB role has CREATEDB, DATABASE_URL_SYNC points at your instance, and TENANT_TEMPLATE_DATABASE (if set) exists.",
-                    },
+                    detail=tenant_provision_http_detail(e),
                 ) from e
 
         hospital = Hospital(
