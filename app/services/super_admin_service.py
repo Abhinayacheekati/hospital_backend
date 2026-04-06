@@ -133,13 +133,19 @@ class SuperAdminService:
                 "id": str(hospital.id),
                 "name": hospital.name,
                 "email": hospital.email,
+                "phone": hospital.phone,
+                "contact": hospital.phone,
+                "address": hospital.address,
                 "city": hospital.city,
                 "state": hospital.state,
+                "country": hospital.country,
+                "pincode": hospital.pincode,
                 "registration_number": hospital.registration_number,
                 "subscription_status": subscription_status,
                 "subscription_plan": subscription_plan,
                 "created_at": hospital.created_at.isoformat(),
-                "is_active": True  # Default for now, will implement proper status field
+                "is_active": bool(hospital.is_active),
+                "status": hospital.status,
             })
         
         return {
