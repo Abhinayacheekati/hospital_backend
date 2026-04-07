@@ -2,7 +2,7 @@
 Provision a dedicated PostgreSQL database per hospital on the same server (one pgAdmin/cluster).
 
 The *platform* database (DATABASE_URL) holds registry rows in `hospitals` including
-`tenant_database_name`. Each hospital gets `CREATE DATABASE hosp_<uuid_hex>`.
+`tenant_database_name`. Each hospital gets `CREATE DATABASE` with a name like `{name_slug}_{8hex}_db`.
 
 Optional: TENANT_TEMPLATE_DATABASE — if set, new DBs are cloned with
 CREATE DATABASE ... WITH TEMPLATE (prepare a template DB once with your schema).
@@ -27,7 +27,7 @@ _SAFE_DB_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
 
 def tenant_provision_http_detail(exc: BaseException, *, reactivate: bool = False) -> dict:
-    """Structured API error so deploys (e.g. Render) see the real Postgres message + fix hint."""
+    """Structured API error with Postgres message and a short local-dev hint."""
     cause = (str(exc) or type(exc).__name__).strip()
     if len(cause) > 900:
         cause = cause[:900] + "…"
@@ -44,14 +44,13 @@ def tenant_provision_http_detail(exc: BaseException, *, reactivate: bool = False
         )
     ):
         hint = (
-            "This database role usually cannot CREATE DATABASE on managed providers (e.g. Render). "
-            "Set TENANT_DB_AUTO_PROVISION=false in your web service environment and redeploy; "
-            "hospitals use the shared database only (no per-hospital DB)."
+            "Your Postgres user needs permission to CREATE DATABASE, or set TENANT_DB_AUTO_PROVISION=false "
+            "to use a single database for all hospitals."
         )
     elif "does not exist" in low and "database" in low:
         hint = (
-            "Wrong or missing database for the admin connection. On Render, leave TENANT_DB_ADMIN_DATABASE "
-            "unset so the database name from DATABASE_URL is used, or set TENANT_DB_AUTO_PROVISION=false."
+            "Check TENANT_DB_ADMIN_DATABASE (default postgres) and that DATABASE_URL_SYNC points at your "
+            "local instance."
         )
 
     msg = (
@@ -69,32 +68,58 @@ def tenant_provision_http_detail(exc: BaseException, *, reactivate: bool = False
     return out
 
 
-def tenant_db_name_for_hospital(hospital_id) -> str:
-    """Deterministic DB name: prefix + 32-char hex (no hyphens)."""
-    prefix = (settings.TENANT_DB_NAME_PREFIX or "hosp_").strip().lower()
-    if not prefix.endswith("_"):
-        prefix = prefix + "_"
+def _slugify_hospital_name_for_db(name: str, max_len: int = 48) -> str:
+    """Lowercase slug safe for PostgreSQL identifiers: letters, digits, underscores only."""
+    s = (name or "").strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    if not s:
+        s = "hospital"
+    if s[0].isdigit():
+        s = "h_" + s
+    return s[:max_len].rstrip("_")
+
+
+def tenant_db_name_for_hospital(hospital_id, hospital_name: Optional[str] = None) -> str:
+    """
+    Unique per-hospital database name on the same Postgres instance.
+
+    With a display name: ``{slug}_{first_8_hex_of_uuid}_db`` (e.g. nagendra_uggirala_0455325a_db).
+    Without name: legacy ``hosp_`` + 32-char hex (prefix from TENANT_DB_NAME_PREFIX).
+    """
     hid = str(hospital_id).replace("-", "")
-    name = f"{prefix}{hid}"
+    short = hid[:8]
+
+    if (hospital_name or "").strip():
+        slug = _slugify_hospital_name_for_db(hospital_name or "")
+        # 63-char PostgreSQL limit: trim slug if needed; keep _{8}_db suffix
+        suffix = f"_{short}_db"
+        max_slug = 63 - len(suffix)
+        if max_slug < 8:
+            name = f"hosp_{hid}"[:63]
+        else:
+            base = slug[:max_slug].rstrip("_")
+            name = f"{base}{suffix}"
+            if len(name) > 63:
+                name = name[:63]
+    else:
+        prefix = (settings.TENANT_DB_NAME_PREFIX or "hosp_").strip().lower()
+        if not prefix.endswith("_"):
+            prefix = prefix + "_"
+        name = f"{prefix}{hid}"
+
     if not _SAFE_DB_NAME.match(name):
-        raise ValueError(f"Invalid tenant database name derived: {name}")
+        name = f"hosp_{hid}"[:63]
     return name
 
 
 def _admin_sync_url() -> str:
-    """
-    Sync URL for the session used to run CREATE DATABASE.
-
-    Render (and similar) only allow connecting to your *assigned* database, not `postgres`.
-    Leave TENANT_DB_ADMIN_DATABASE empty to reuse the database name from DATABASE_URL_SYNC.
-    """
+    """Sync URL connected to the maintenance DB (default postgres) to run CREATE DATABASE."""
     sync = (settings.DATABASE_URL_SYNC or "").strip()
     if not sync:
         raise RuntimeError("DATABASE_URL_SYNC is required for tenant DB provisioning")
     u = make_url(sync)
-    maint = (settings.TENANT_DB_ADMIN_DATABASE or "").strip()
-    if not maint:
-        maint = u.database or "postgres"
+    maint = (settings.TENANT_DB_ADMIN_DATABASE or "postgres").strip()
     u = u.set(database=maint)
     return u.render_as_string(hide_password=False)
 
@@ -129,15 +154,15 @@ def provision_postgres_database(
             logger.info("Tenant database already exists: %s", db_name)
             return
 
+        # Omit OWNER — defaults to connecting role. "OWNER CURRENT_USER" breaks on some hosts/parsers.
         if tpl:
             stmt = text(
-                f'CREATE DATABASE "{db_name}" WITH TEMPLATE "{tpl}" '
-                f"OWNER CURRENT_USER ENCODING 'UTF8'"
+                f'CREATE DATABASE "{db_name}" WITH TEMPLATE "{tpl}"'
             )
             logger.info("Creating tenant database %s FROM TEMPLATE %s", db_name, tpl)
         else:
             stmt = text(
-                f'CREATE DATABASE "{db_name}" OWNER CURRENT_USER ENCODING \'UTF8\''
+                f'CREATE DATABASE "{db_name}" ENCODING \'UTF8\''
             )
             logger.info("Creating empty tenant database %s (no template)", db_name)
 

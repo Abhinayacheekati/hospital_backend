@@ -173,7 +173,7 @@ class AuthService:
                     )
 
                     used_template = bool((settings.TENANT_TEMPLATE_DATABASE or "").strip())
-                    tdb = tenant_db_name_for_hospital(existing_hospital.id)
+                    tdb = tenant_db_name_for_hospital(existing_hospital.id, existing_hospital.name)
                     try:
                         await asyncio.to_thread(provision_postgres_database, tdb, None)
                     except Exception as e:
@@ -214,7 +214,7 @@ class AuthService:
                 tenant_provision_http_detail,
             )
 
-            tenant_db = tenant_db_name_for_hospital(hospital_id)
+            tenant_db = tenant_db_name_for_hospital(hospital_id, hospital_data.get("name"))
             try:
                 await asyncio.to_thread(provision_postgres_database, tenant_db, None)
             except Exception as e:

@@ -58,8 +58,8 @@ class Settings(BaseSettings):
         default=True,
         env="TENANT_DB_AUTO_PROVISION",
         description=(
-            "When True, create_hospital runs CREATE DATABASE per tenant. "
-            "Managed Postgres (Render, Neon, RDS, etc.) usually denies CREATEDB—set false and use one database."
+            "When True, each new hospital gets CREATE DATABASE on the same Postgres server "
+            "(DB user needs CREATEDB). Set false for a single shared database only."
         ),
     )
     TENANT_DB_NAME_PREFIX: str = Field(
@@ -73,13 +73,9 @@ class Settings(BaseSettings):
         description="Optional: clone new tenant DBs from this template (prepare once with schema)",
     )
     TENANT_DB_ADMIN_DATABASE: str = Field(
-        default="",
+        default="postgres",
         env="TENANT_DB_ADMIN_DATABASE",
-        description=(
-            "Database to connect to when running CREATE DATABASE. "
-            "Empty: use the DB name from DATABASE_URL (needed for Render—you only have one DB). "
-            "Self-hosted: set to postgres if your role connects via the postgres database."
-        ),
+        description="Database used for CREATE DATABASE sessions (local default: postgres).",
     )
     TENANT_DB_ROUTE_QUERIES: bool = Field(
         default=True,
@@ -211,13 +207,6 @@ class Settings(BaseSettings):
                 async_url = self._to_async_url(sync_url)
             elif self._is_local_url(sync_url) and not self._is_local_url(async_url):
                 sync_url = self._to_sync_url(async_url)
-
-        if os.getenv("RENDER", "").lower() in {"true", "1"}:
-            if self._is_local_url(async_url) or self._is_local_url(sync_url):
-                logger.warning(
-                    "Database URL points to localhost in Render. "
-                    "Set DATABASE_URL to your Render Postgres URL."
-                )
 
         self.DATABASE_URL = async_url
         self.DATABASE_URL_SYNC = sync_url
