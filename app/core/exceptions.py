@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError, OperationalError, DBAPIError
 import logging
+import socket
 from typing import List
 
 logger = logging.getLogger(__name__)
@@ -238,6 +239,13 @@ async def general_exception_handler(request: Request, exc: Exception) -> JSONRes
         }
     )
     err_msg = f"{type(exc).__name__}: {str(exc)}"
+    if isinstance(exc, socket.gaierror) or (
+        isinstance(exc, OSError) and "getaddrinfo failed" in str(exc).lower()
+    ):
+        err_msg += (
+            " — DNS could not resolve a host. For local dev use DATABASE_URL with host localhost or "
+            "127.0.0.1, and check REDIS_URL (default redis://localhost:6379/0)."
+        )
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content=create_error_response(
