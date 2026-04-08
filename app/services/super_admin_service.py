@@ -1424,12 +1424,23 @@ class SuperAdminService:
         await self.db.commit()
         return {"ticket_id": str(ticket.id), "status": "OPEN", "message": "Ticket created"}
 
+    def _normalize_ticket_status_filter(self, status: Optional[str]) -> Optional[str]:
+        """Frontends often send status=all; only real statuses should filter."""
+        if not status:
+            return None
+        s = str(status).strip()
+        if not s or s.lower() in ("all", "any", "*"):
+            return None
+        return s
+
     async def list_support_tickets(
         self, hospital_id: Optional[uuid.UUID] = None, status: Optional[str] = None, skip: int = 0, limit: int = 50
     ) -> Dict[str, Any]:
         """List support tickets: merged from each hospital's dedicated database when provisioned."""
         from app.models.support import SupportTicket
         from app.database.session import get_tenant_session_factory
+
+        status = self._normalize_ticket_status_filter(status)
 
         hq = select(Hospital.id, Hospital.tenant_database_name).where(Hospital.tenant_database_name.isnot(None))
         if hospital_id:
@@ -1477,6 +1488,7 @@ class SuperAdminService:
         """Pre–per-tenant DB: tickets lived on the platform database."""
         from app.models.support import SupportTicket
 
+        status = self._normalize_ticket_status_filter(status)
         conditions = []
         if hospital_id:
             conditions.append(SupportTicket.hospital_id == hospital_id)
