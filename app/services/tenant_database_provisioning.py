@@ -184,6 +184,8 @@ def async_url_for_tenant_database(db_name: str) -> str:
     s = sync_url_for_tenant_database(db_name)
     if s.startswith("postgresql+asyncpg://"):
         return s
+    if s.startswith("postgresql+psycopg2://"):
+        return "postgresql+asyncpg://" + s[len("postgresql+psycopg2://") :]
     if s.startswith("postgresql://"):
         return "postgresql+asyncpg://" + s[len("postgresql://") :]
     if s.startswith("postgres://"):
