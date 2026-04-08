@@ -182,14 +182,14 @@ def sync_url_for_tenant_database(db_name: str) -> str:
 def async_url_for_tenant_database(db_name: str) -> str:
     """Build async DSN (+asyncpg) for a tenant database."""
     s = sync_url_for_tenant_database(db_name)
-    if s.startswith("postgresql+asyncpg://"):
-        return s
-    if s.startswith("postgresql+psycopg2://"):
-        return "postgresql+asyncpg://" + s[len("postgresql+psycopg2://") :]
-    if s.startswith("postgresql://"):
-        return "postgresql+asyncpg://" + s[len("postgresql://") :]
-    if s.startswith("postgres://"):
-        return "postgresql+asyncpg://" + s[len("postgres://") :]
+    u = make_url(s)
+    driver = (u.drivername or "").lower()
+    if driver == "postgresql+asyncpg":
+        return u.render_as_string(hide_password=False)
+    if driver.startswith("postgresql"):
+        return u.set(drivername="postgresql+asyncpg").render_as_string(hide_password=False)
+    if driver == "postgres":
+        return u.set(drivername="postgresql+asyncpg").render_as_string(hide_password=False)
     return s
 
 
