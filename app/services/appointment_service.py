@@ -76,87 +76,101 @@ class AppointmentService:
             for doctor in doctors
         ]
     
-    async def get_doctor_available_slots(
-        self, 
-        doctor_id: str, 
-        date: str, 
-        hospital_id: str
+    async def get_available_time_slots_for_doctor_user(
+        self,
+        doctor_user_id: uuid.UUID,
+        date: str,
     ) -> List[Dict[str, Any]]:
-        """Get available time slots for a doctor on a specific date"""
-        
-        # Get doctor with schedules
+        """
+        Build bookable time slots for a doctor (User.id) on a date from DoctorSchedule only.
+        No default hours — if the doctor has no active schedule row for that weekday, returns [].
+        """
+        target_date = datetime.fromisoformat(date)
+        day_of_week = target_date.strftime("%A").upper()
+
+        result = await self.db.execute(
+            select(DoctorSchedule).where(
+                and_(
+                    DoctorSchedule.doctor_id == doctor_user_id,
+                    DoctorSchedule.day_of_week == day_of_week,
+                    DoctorSchedule.is_active == True,
+                )
+            )
+        )
+        doctor_schedule = result.scalar_one_or_none()
+        if not doctor_schedule:
+            return []
+
+        slots: List[Dict[str, Any]] = []
+        current_time = datetime.combine(target_date.date(), doctor_schedule.start_time)
+        end_boundary = datetime.combine(target_date.date(), doctor_schedule.end_time)
+        slot_duration = timedelta(minutes=doctor_schedule.slot_duration_minutes or 30)
+        max_patients = max(1, doctor_schedule.max_patients_per_slot or 1)
+
+        while current_time + slot_duration <= end_boundary:
+            t = current_time.time()
+            if (
+                doctor_schedule.break_start_time
+                and doctor_schedule.break_end_time
+                and doctor_schedule.break_start_time <= t < doctor_schedule.break_end_time
+            ):
+                current_time += slot_duration
+                continue
+
+            if target_date.date() == datetime.now().date() and current_time <= datetime.now():
+                current_time += slot_duration
+                continue
+
+            time_hms = current_time.strftime("%H:%M:%S")
+            booked_q = await self.db.execute(
+                select(func.count(Appointment.id)).where(
+                    and_(
+                        Appointment.doctor_id == doctor_user_id,
+                        Appointment.appointment_date == date,
+                        Appointment.appointment_time == time_hms,
+                        Appointment.status.in_([AppointmentStatus.REQUESTED, AppointmentStatus.CONFIRMED]),
+                    )
+                )
+            )
+            booked = int(booked_q.scalar() or 0)
+            is_available = booked < max_patients
+
+            slots.append(
+                {
+                    "time": current_time.strftime("%H:%M"),
+                    "time_24h": time_hms,
+                    "is_available": is_available,
+                    "duration_minutes": doctor_schedule.slot_duration_minutes,
+                }
+            )
+            current_time += slot_duration
+
+        return slots
+
+    async def get_doctor_available_slots(
+        self,
+        doctor_id: str,
+        date: str,
+        hospital_id: str,
+    ) -> List[Dict[str, Any]]:
+        """Get available time slots for a doctor profile (DoctorProfile.id) on a specific date."""
         result = await self.db.execute(
             select(DoctorProfile)
             .where(
                 DoctorProfile.id == doctor_id,
-                DoctorProfile.hospital_id == hospital_id
+                DoctorProfile.hospital_id == hospital_id,
             )
-            .options(selectinload(DoctorProfile.schedules))
+            .options(selectinload(DoctorProfile.user))
         )
         doctor = result.scalar_one_or_none()
-        
+
         if not doctor:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Doctor not found"
+                detail="Doctor not found",
             )
-        
-        # Parse date and get day of week
-        target_date = datetime.fromisoformat(date)
-        day_of_week = target_date.strftime('%A').upper()
-        
-        # Find doctor's schedule for this day
-        doctor_schedule = None
-        for schedule in doctor.schedules:
-            if schedule.day_of_week == day_of_week and schedule.is_active:
-                doctor_schedule = schedule
-                break
-        
-        if not doctor_schedule:
-            return []  # Doctor not available on this day
-        
-        # Generate time slots
-        slots = []
-        current_time = datetime.combine(target_date.date(), doctor_schedule.start_time)
-        end_time = datetime.combine(target_date.date(), doctor_schedule.end_time)
-        slot_duration = timedelta(minutes=doctor_schedule.slot_duration_minutes)
-        
-        while current_time + slot_duration <= end_time:
-            # Skip break time
-            if (doctor_schedule.break_start_time and doctor_schedule.break_end_time and
-                doctor_schedule.break_start_time <= current_time.time() < doctor_schedule.break_end_time):
-                current_time += slot_duration
-                continue
-            
-            # Skip past times for today
-            if target_date.date() == datetime.now().date() and current_time <= datetime.now():
-                current_time += slot_duration
-                continue
-            
-            # Check if slot is available (no existing appointments)
-            existing_appointments = await self.db.execute(
-                select(Appointment)
-                .where(
-                    and_(
-                        Appointment.doctor_id == doctor_id,
-                        Appointment.appointment_date == date,
-                        Appointment.appointment_time == current_time.strftime('%H:%M:%S'),
-                        Appointment.status.in_([AppointmentStatus.REQUESTED, AppointmentStatus.CONFIRMED])
-                    )
-                )
-            )
-            is_available = existing_appointments.scalar_one_or_none() is None
-            
-            slots.append({
-                "time": current_time.strftime('%H:%M'),
-                "time_24h": current_time.strftime('%H:%M:%S'),
-                "is_available": is_available,
-                "duration_minutes": doctor_schedule.slot_duration_minutes
-            })
-            
-            current_time += slot_duration
-        
-        return slots
+
+        return await self.get_available_time_slots_for_doctor_user(doctor.user_id, date)
     
     async def create_appointment(
         self,
@@ -253,11 +267,11 @@ class AppointmentService:
                 break
             appointment_ref = generate_appointment_ref()
         
-        # Create appointment
+        # Create appointment (doctor_id references users.id, same as DoctorSchedule)
         appointment = Appointment(
             appointment_ref=appointment_ref,
             patient_id=patient.id,
-            doctor_id=doctor.id,
+            doctor_id=doctor.user_id,
             department_id=department_id,
             hospital_id=hospital_id,
             appointment_date=appointment_date,

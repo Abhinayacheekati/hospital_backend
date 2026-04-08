@@ -193,7 +193,7 @@ async def patient_register(
     Sends OTP to email for verification
     """
     auth_service = AuthService(db)
-    result = await auth_service.register_patient(registration_data.dict())
+    result = await auth_service.register_patient(registration_data.model_dump(mode="json"))
     # Include hospital_id and hospital_name when assigned (registration is the only place patients get hospital_id)
     return SuccessResponse(
         success=True,

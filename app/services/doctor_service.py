@@ -10,11 +10,11 @@ from sqlalchemy import select, and_, or_, desc, func, asc, update, delete
 from sqlalchemy.orm import selectinload
 from fastapi import HTTPException, status
 
-from app.models.user import User
+from app.models.user import User, Role, user_roles
 from app.models.patient import PatientProfile, Appointment, MedicalRecord, Admission
 from app.models.hospital import Department, StaffDepartmentAssignment
 from app.models.schedule import DoctorSchedule
-from app.core.enums import UserRole, AppointmentStatus, DayOfWeek
+from app.core.enums import UserRole, AppointmentStatus, UserStatus, DayOfWeek
 from app.core.utils import generate_patient_ref, parse_date_string, validate_medicine_id
 
 
@@ -418,6 +418,293 @@ class DoctorService:
         return {
             "schedule_id": str(schedule.id),
             "message": "Schedule slot deleted successfully"
+        }
+    
+    # ============================================================================
+    # STAFF-MANAGED DOCTOR SCHEDULES (receptionist / nurse)
+    # ============================================================================
+    
+    async def _get_staff_department_id_for_schedule(self, acting_user: User) -> uuid.UUID:
+        if not acting_user.hospital_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Hospital context required to manage doctor schedules.",
+            )
+        r = await self.db.execute(
+            select(StaffDepartmentAssignment.department_id).where(
+                and_(
+                    StaffDepartmentAssignment.staff_id == acting_user.id,
+                    StaffDepartmentAssignment.is_active == True,
+                )
+            )
+        )
+        dept_id = r.scalar_one_or_none()
+        if not dept_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No active department assignment found. Ask your admin to assign you to a department.",
+            )
+        return dept_id
+    
+    async def get_staff_department_name(self, acting_user: User) -> Optional[str]:
+        """Display name of the department the acting nurse/receptionist is assigned to."""
+        dept_id = await self._get_staff_department_id_for_schedule(acting_user)
+        row = await self.db.execute(select(Department.name).where(Department.id == dept_id))
+        return row.scalar_one_or_none()
+    
+    async def get_target_doctor_in_hospital_for_staff_by_name(
+        self, acting_user: User, doctor_name: str
+    ) -> User:
+        """
+        Resolve doctor by display name; must be in the same hospital and same department
+        as the acting receptionist/nurse (via StaffDepartmentAssignment).
+        """
+        raw = (doctor_name or "").strip()
+        if not raw:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="doctor_name is required (e.g. Dr. Jane Smith or Jane Smith).",
+            )
+        dept_id = await self._get_staff_department_id_for_schedule(acting_user)
+        q = (
+            select(User)
+            .join(user_roles, User.id == user_roles.c.user_id)
+            .join(Role, user_roles.c.role_id == Role.id)
+            .join(
+                StaffDepartmentAssignment,
+                and_(
+                    StaffDepartmentAssignment.staff_id == User.id,
+                    StaffDepartmentAssignment.department_id == dept_id,
+                    StaffDepartmentAssignment.is_active == True,
+                ),
+            )
+            .where(
+                and_(
+                    User.hospital_id == acting_user.hospital_id,
+                    User.status == UserStatus.ACTIVE,
+                    Role.name == UserRole.DOCTOR,
+                    or_(
+                        func.concat("Dr. ", User.first_name, " ", User.last_name).ilike(
+                            f"%{raw}%"
+                        ),
+                        func.concat(User.first_name, " ", User.last_name).ilike(f"%{raw}%"),
+                    ),
+                )
+            )
+            .options(selectinload(User.roles))
+        )
+        result = await self.db.execute(q)
+        doctors = list(result.scalars().unique().all())
+        if len(doctors) > 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Multiple doctors in your department match that name. "
+                    "Use a fuller name (e.g. include last name)."
+                ),
+            )
+        if not doctors:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    f"No doctor matching '{raw}' in your department. "
+                    "They must be assigned to the same department as you."
+                ),
+            )
+        return doctors[0]
+    
+    async def _ensure_schedule_doctor_in_staff_department(
+        self, acting_user: User, doctor_user_id: uuid.UUID
+    ) -> None:
+        dept_id = await self._get_staff_department_id_for_schedule(acting_user)
+        r = await self.db.execute(
+            select(StaffDepartmentAssignment.id).where(
+                and_(
+                    StaffDepartmentAssignment.staff_id == doctor_user_id,
+                    StaffDepartmentAssignment.department_id == dept_id,
+                    StaffDepartmentAssignment.is_active == True,
+                )
+            )
+        )
+        if not r.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="That schedule belongs to a doctor outside your department.",
+            )
+    
+    async def get_schedule_slots_for_target_doctor(
+        self, acting_user: User, doctor_name: str
+    ) -> Dict[str, Any]:
+        """Weekly schedule template rows for a doctor (same shape as doctor self-service)."""
+        doctor_user = await self.get_target_doctor_in_hospital_for_staff_by_name(
+            acting_user, doctor_name
+        )
+        schedules_result = await self.db.execute(
+            select(DoctorSchedule)
+            .where(
+                and_(
+                    DoctorSchedule.doctor_id == doctor_user.id,
+                    DoctorSchedule.hospital_id == acting_user.hospital_id,
+                    DoctorSchedule.is_active == True,
+                )
+            )
+            .order_by(DoctorSchedule.day_of_week)
+        )
+        schedules = schedules_result.scalars().all()
+        schedule_slots = []
+        for schedule in schedules:
+            schedule_slots.append(
+                {
+                    "schedule_id": str(schedule.id),
+                    "day_of_week": schedule.day_of_week,
+                    "start_time": schedule.start_time.strftime("%H:%M"),
+                    "end_time": schedule.end_time.strftime("%H:%M"),
+                    "slot_duration_minutes": schedule.slot_duration_minutes,
+                    "break_start_time": schedule.break_start_time.strftime("%H:%M")
+                    if schedule.break_start_time
+                    else None,
+                    "break_end_time": schedule.break_end_time.strftime("%H:%M")
+                    if schedule.break_end_time
+                    else None,
+                    "max_patients_per_slot": schedule.max_patients_per_slot,
+                    "is_active": schedule.is_active,
+                    "notes": schedule.notes,
+                }
+            )
+        dept_nm = await self.get_staff_department_name(acting_user)
+        return {
+            "doctor_user_id": str(doctor_user.id),
+            "doctor_name": f"Dr. {doctor_user.first_name} {doctor_user.last_name}",
+            "department_name": dept_nm,
+            "total_schedules": len(schedule_slots),
+            "schedules": schedule_slots,
+        }
+    
+    async def create_schedule_slot_for_staff(
+        self,
+        acting_user: User,
+        doctor_name: str,
+        schedule_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        doctor_user = await self.get_target_doctor_in_hospital_for_staff_by_name(
+            acting_user, doctor_name
+        )
+        existing_schedule = await self.db.execute(
+            select(DoctorSchedule)
+            .where(
+                and_(
+                    DoctorSchedule.doctor_id == doctor_user.id,
+                    DoctorSchedule.day_of_week == schedule_data["day_of_week"],
+                    DoctorSchedule.hospital_id == acting_user.hospital_id,
+                )
+            )
+        )
+        if existing_schedule.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Schedule already exists for {schedule_data['day_of_week']}",
+            )
+        start_time = datetime.strptime(schedule_data["start_time"], "%H:%M").time()
+        end_time = datetime.strptime(schedule_data["end_time"], "%H:%M").time()
+        break_start_time = None
+        break_end_time = None
+        if schedule_data.get("break_start_time"):
+            break_start_time = datetime.strptime(schedule_data["break_start_time"], "%H:%M").time()
+        if schedule_data.get("break_end_time"):
+            break_end_time = datetime.strptime(schedule_data["break_end_time"], "%H:%M").time()
+        schedule = DoctorSchedule(
+            id=uuid.uuid4(),
+            hospital_id=acting_user.hospital_id,
+            doctor_id=doctor_user.id,
+            day_of_week=schedule_data["day_of_week"],
+            start_time=start_time,
+            end_time=end_time,
+            slot_duration_minutes=schedule_data.get("slot_duration_minutes", 30),
+            max_patients_per_slot=schedule_data.get("max_patients_per_slot", 1),
+            break_start_time=break_start_time,
+            break_end_time=break_end_time,
+            notes=schedule_data.get("notes"),
+            is_emergency_available=schedule_data.get("is_emergency_available", False),
+        )
+        self.db.add(schedule)
+        await self.db.commit()
+        return {
+            "schedule_id": str(schedule.id),
+            "doctor_user_id": str(doctor_user.id),
+            "day_of_week": schedule.day_of_week,
+            "start_time": schedule.start_time.strftime("%H:%M"),
+            "end_time": schedule.end_time.strftime("%H:%M"),
+            "message": "Schedule slot created successfully",
+        }
+    
+    async def update_schedule_slot_for_staff(
+        self,
+        acting_user: User,
+        schedule_id: str,
+        update_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not acting_user.hospital_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Hospital context required",
+            )
+        schedule_result = await self.db.execute(
+            select(DoctorSchedule).where(
+                and_(
+                    DoctorSchedule.id == uuid.UUID(schedule_id),
+                    DoctorSchedule.hospital_id == acting_user.hospital_id,
+                )
+            )
+        )
+        schedule = schedule_result.scalar_one_or_none()
+        if not schedule:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Schedule slot not found",
+            )
+        await self._ensure_schedule_doctor_in_staff_department(acting_user, schedule.doctor_id)
+        for field, value in update_data.items():
+            if field in ["start_time", "end_time", "break_start_time", "break_end_time"] and value:
+                setattr(schedule, field, datetime.strptime(value, "%H:%M").time())
+            elif hasattr(schedule, field) and value is not None:
+                setattr(schedule, field, value)
+        await self.db.commit()
+        return {
+            "schedule_id": str(schedule.id),
+            "doctor_user_id": str(schedule.doctor_id),
+            "message": "Schedule slot updated successfully",
+        }
+    
+    async def delete_schedule_slot_for_staff(
+        self, acting_user: User, schedule_id: str
+    ) -> Dict[str, Any]:
+        if not acting_user.hospital_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Hospital context required",
+            )
+        schedule_result = await self.db.execute(
+            select(DoctorSchedule).where(
+                and_(
+                    DoctorSchedule.id == uuid.UUID(schedule_id),
+                    DoctorSchedule.hospital_id == acting_user.hospital_id,
+                )
+            )
+        )
+        schedule = schedule_result.scalar_one_or_none()
+        if not schedule:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Schedule slot not found",
+            )
+        await self._ensure_schedule_doctor_in_staff_department(acting_user, schedule.doctor_id)
+        doc_id = schedule.doctor_id
+        await self.db.delete(schedule)
+        await self.db.commit()
+        return {
+            "schedule_id": schedule_id,
+            "doctor_user_id": str(doc_id),
+            "message": "Schedule slot deleted successfully",
         }
     
     # ============================================================================

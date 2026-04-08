@@ -2,7 +2,7 @@
 Clinical operations schemas for OPD, IPD, and nursing management.
 """
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator
 
 
 # ============================================================================
@@ -14,7 +14,7 @@ class PatientRegistrationCreate(BaseModel):
     first_name: str
     last_name: str
     phone: str
-    email: Optional[str] = None
+    email: Optional[EmailStr] = None
     date_of_birth: str  # YYYY-MM-DD
     gender: str  # MALE, FEMALE, OTHER
     address: Optional[str] = None
@@ -22,12 +22,33 @@ class PatientRegistrationCreate(BaseModel):
     emergency_contact_name: Optional[str] = None
     emergency_contact_phone: Optional[str] = None
     emergency_contact_relation: Optional[str] = None
+    password: Optional[str] = Field(
+        default=None,
+        min_length=8,
+        max_length=128,
+        description=(
+            "Optional. If set, patient can log in via POST /auth/patient/login with this email and password "
+            "(same as online registration). Requires email."
+        ),
+    )
+
+    @field_validator("password", mode="before")
+    @classmethod
+    def empty_password_to_none(cls, v):
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        return v
+
+    @model_validator(mode="after")
+    def password_requires_email(self):
+        if self.password and not self.email:
+            raise ValueError("email is required when password is set so the patient can use patient login")
+        return self
 
 
 class AppointmentSchedulingCreate(BaseModel):
-    """Schedule appointment for patient"""
-    patient_ref: Optional[str] = None  # Existing patient
-    patient_registration: Optional[PatientRegistrationCreate] = None  # New patient
+    """Schedule appointment for an existing patient (register via POST /receptionist/patients/register first)."""
+    patient_ref: str = Field(..., min_length=1, description="Patient MRN / PAT-... from registration")
     doctor_name: str  # "Dr. John Smith"
     department_name: str  # "Cardiology"
     appointment_date: str  # YYYY-MM-DD

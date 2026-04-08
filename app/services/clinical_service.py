@@ -145,9 +145,10 @@ class ClinicalService:
             )
         
         # Check if email already exists (if provided)
-        if patient_data.get("email"):
+        email_norm = (patient_data.get("email") or "").strip().lower() if patient_data.get("email") else None
+        if email_norm:
             existing_email = await self.db.execute(
-                select(User).where(User.email == patient_data["email"])
+                select(User).where(User.email == email_norm)
             )
             if existing_email.first():
                 raise HTTPException(
@@ -158,20 +159,47 @@ class ClinicalService:
         # Generate patient reference
         patient_ref = generate_patient_ref()
         
-        # Create User record
-        temp_password = self.security.generate_temp_password()
-        password_hash = self.security.hash_password(temp_password)
+        portal_password = (patient_data.get("password") or "").strip() or None
+        temp_password: Optional[str] = None
+        if portal_password and not email_norm:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email is required when setting a password for patient portal login.",
+            )
+        if portal_password:
+            from app.services.auth_service import PasswordValidator
+
+            pwd_check = PasswordValidator.validate_password(
+                portal_password,
+                email_norm or "",
+                patient_data.get("phone", "") or "",
+            )
+            if not pwd_check["valid"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "PWD_001",
+                        "message": "Password does not meet security requirements",
+                        "errors": pwd_check["errors"],
+                    },
+                )
+            password_hash = self.security.hash_password(portal_password)
+            email_verified = True
+        else:
+            temp_password = self.security.generate_temp_password()
+            password_hash = self.security.hash_password(temp_password)
+            email_verified = False
         
         user = User(
             id=uuid.uuid4(),
             hospital_id=user_context["hospital_id"],
-            email=patient_data.get("email"),
+            email=email_norm,
             phone=patient_data["phone"],
             password_hash=password_hash,
             first_name=patient_data["first_name"],
             last_name=patient_data["last_name"],
             status=UserStatus.ACTIVE,
-            email_verified=False,
+            email_verified=email_verified,
             phone_verified=False
         )
         
@@ -209,9 +237,8 @@ class ClinicalService:
         )
         
         self.db.add(patient_profile)
-        await self.db.commit()
+        await self.db.flush()
 
-        # Include hospital_id and hospital_name (registration is the only place patients get hospital_id)
         hospital_id_str = user_context.get("hospital_id")
         hospital_name = None
         if hospital_id_str:
@@ -224,20 +251,70 @@ class ClinicalService:
                     hospital_name = hospital.name
             except (ValueError, TypeError):
                 pass
+
+        if portal_password and email_norm:
+            from app.services.email_service import EmailService
+
+            es = EmailService()
+            if not es.is_smtp_configured():
+                await self.db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        "code": "SMTP_NOT_CONFIGURED",
+                        "message": (
+                            "Patient portal registration requires delivering login details by email. "
+                            "Configure SMTP_USER, SMTP_PASS, SMTP_HOST, and EMAIL_FROM, then try again."
+                        ),
+                    },
+                )
+            sent = await es.send_patient_portal_credentials_email(
+                to_email=email_norm,
+                first_name=patient_data["first_name"],
+                login_email=email_norm,
+                password_plain=portal_password,
+                hospital_name=hospital_name,
+            )
+            if not sent:
+                await self.db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        "code": "CREDENTIALS_EMAIL_FAILED",
+                        "message": (
+                            "Login details could not be sent by email after multiple attempts. "
+                            "Registration was not saved. Check SMTP connectivity or provider status and try again."
+                        ),
+                    },
+                )
+
+        await self.db.commit()
+
         result = {
             "patient_ref": patient_ref,
             "patient_name": f"{patient_data['first_name']} {patient_data['last_name']}",
             "phone": patient_data["phone"],
-            "email": patient_data.get("email"),
-            "temp_password": temp_password,
+            "email": email_norm,
             "registered_by": f"{current_user.first_name} {current_user.last_name} (Receptionist)",
             "registration_date": datetime.utcnow().isoformat(),
             "message": "Patient registered successfully for OPD services",
         }
+        if portal_password:
+            result["portal_login_enabled"] = True
+            result[
+                "message"
+            ] = "Patient registered. They can sign in with POST /api/v1/auth/patient/login using this email and password."
+        else:
+            result["temp_password"] = temp_password
+            result["portal_login_enabled"] = False
         if hospital_id_str:
             result["hospital_id"] = hospital_id_str
         if hospital_name:
             result["hospital_name"] = hospital_name
+
+        if portal_password and email_norm:
+            result["credentials_email_sent"] = True
+
         return result
     
     # ============================================================================
@@ -249,78 +326,50 @@ class ClinicalService:
         user_context = self.get_user_context(current_user)
         receptionist = await self.get_receptionist_profile(user_context)
         
-        # Get or create patient
+        # Resolve existing patient (register via /receptionist/patients/register first)
         patient = None
         hospital_id_uuid = None
         if user_context.get("hospital_id"):
             hospital_id_uuid = uuid.UUID(user_context["hospital_id"]) if isinstance(user_context["hospital_id"], str) else user_context["hospital_id"]
         
-        if appointment_data.get("patient_ref"):
-            # Existing patient - first try with hospital_id filter if available
-            if hospital_id_uuid:
-                patient_result = await self.db.execute(
-                    select(PatientProfile)
-                    .where(
-                        and_(
-                            PatientProfile.patient_id == appointment_data["patient_ref"],
-                            PatientProfile.hospital_id == hospital_id_uuid
-                        )
-                    )
-                    .options(selectinload(PatientProfile.user))
-                )
-                patient = patient_result.scalar_one_or_none()
-            
-            # If not found, try without hospital_id filter (for patients with null hospital_id)
-            if not patient:
-                patient_result = await self.db.execute(
-                    select(PatientProfile)
-                    .where(PatientProfile.patient_id == appointment_data["patient_ref"])
-                    .options(selectinload(PatientProfile.user))
-                )
-                patient = patient_result.scalar_one_or_none()
-                
-                # If found and hospital_id is null, assign it to both patient and user
-                if patient and patient.hospital_id is None and hospital_id_uuid:
-                    patient.hospital_id = hospital_id_uuid
-                    # Also update the user's hospital_id
-                    if patient.user and patient.user.hospital_id is None:
-                        patient.user.hospital_id = hospital_id_uuid
-            
-            if not patient:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Patient {appointment_data['patient_ref']} not found"
-                )
-        elif appointment_data.get("patient_registration"):
-            # Register new patient first (register_opd_patient already sets hospital_id)
-            registration_result = await self.register_opd_patient(
-                appointment_data["patient_registration"], current_user
-            )
-            # Get the newly created patient (should already have hospital_id set from registration)
-            if hospital_id_uuid:
-                patient_result = await self.db.execute(
-                    select(PatientProfile)
-                    .where(
-                        and_(
-                            PatientProfile.patient_id == registration_result["patient_ref"],
-                            PatientProfile.hospital_id == hospital_id_uuid
-                        )
-                    )
-                    .options(selectinload(PatientProfile.user))
-                )
-                patient = patient_result.scalar_one_or_none()
-            else:
-                # Fallback: get patient without hospital_id filter (shouldn't happen)
-                patient_result = await self.db.execute(
-                    select(PatientProfile)
-                    .where(PatientProfile.patient_id == registration_result["patient_ref"])
-                    .options(selectinload(PatientProfile.user))
-                )
-                patient = patient_result.scalar_one_or_none()
-        else:
+        # Patient must already exist (OPD registration endpoint)
+        patient_ref = (appointment_data.get("patient_ref") or "").strip()
+        if not patient_ref:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Either patient_ref or patient_registration must be provided"
+                detail="patient_ref is required. Register the patient first via POST /receptionist/patients/register.",
+            )
+
+        if hospital_id_uuid:
+            patient_result = await self.db.execute(
+                select(PatientProfile)
+                .where(
+                    and_(
+                        PatientProfile.patient_id == patient_ref,
+                        PatientProfile.hospital_id == hospital_id_uuid,
+                    )
+                )
+                .options(selectinload(PatientProfile.user))
+            )
+            patient = patient_result.scalar_one_or_none()
+
+        if not patient:
+            patient_result = await self.db.execute(
+                select(PatientProfile)
+                .where(PatientProfile.patient_id == patient_ref)
+                .options(selectinload(PatientProfile.user))
+            )
+            patient = patient_result.scalar_one_or_none()
+
+            if patient and patient.hospital_id is None and hospital_id_uuid:
+                patient.hospital_id = hospital_id_uuid
+                if patient.user and patient.user.hospital_id is None:
+                    patient.user.hospital_id = hospital_id_uuid
+
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Patient '{patient_ref}' not found. Register via POST /receptionist/patients/register first.",
             )
         
         # Ensure hospital_id is available for appointment creation

@@ -1275,44 +1275,46 @@ class AuthService:
         Resolve hospital for patient registration.
 
         Behavior:
-        - If hospital_name is provided: use it (existing behavior).
-        - If hospital_name is omitted:
-            - If exactly one active hospital exists, use that automatically.
-            - If zero or multiple active hospitals exist, return a clear error.
+        - If hospital_id is provided: load that active hospital by UUID.
+        - If hospital_id is omitted: auto-resolve when a single sensible default exists (see below).
         """
-        hospital_name = (registration_data.get("hospital_name") or "").strip()
-
-        if hospital_name:
-            # Find hospital by name (case-insensitive)
-            result = await self.db.execute(
-                select(Hospital).where(
-                    and_(
-                        func.lower(Hospital.name) == hospital_name.lower(),
-                        Hospital.is_active == True
+        raw_hid = registration_data.get("hospital_id")
+        hospital_id: Optional[uuid.UUID] = None
+        if raw_hid is not None and raw_hid != "":
+            if isinstance(raw_hid, uuid.UUID):
+                hospital_id = raw_hid
+            else:
+                try:
+                    hospital_id = uuid.UUID(str(raw_hid).strip())
+                except (ValueError, TypeError):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={
+                            "code": "AUTH_012",
+                            "message": "Invalid hospital_id; must be a UUID (use GET /api/v1/auth/hospitals).",
+                        },
                     )
-                )
-            )
-            hospital = result.scalar_one_or_none()
 
-            if not hospital:
-                # Get list of available hospitals for helpful error message
-                available_hospitals = await self.db.execute(
-                    select(Hospital.name).where(Hospital.is_active == True).order_by(Hospital.name)
+        if hospital_id is not None:
+            hospital = await self._get_hospital_by_id(hospital_id)
+            if not hospital or not getattr(hospital, "is_active", True):
+                available = await self.db.execute(
+                    select(Hospital.id, Hospital.name)
+                    .where(Hospital.is_active == True)
+                    .order_by(Hospital.name)
                 )
-                hospital_names = [name for name, in available_hospitals.fetchall()]
-
+                choices = [{"id": str(rid), "name": rname} for rid, rname in available.fetchall()]
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail={
                         "code": "AUTH_013",
-                        "message": f"Hospital '{hospital_name}' not found or inactive",
-                        "available_hospitals": hospital_names,
+                        "message": "Hospital not found or inactive for the given hospital_id",
+                        "available_hospitals": choices,
                     },
                 )
-
             return hospital
 
-        # No hospital_name provided: try to auto-resolve
+        # No hospital_id provided: try to auto-resolve
         result = await self.db.execute(
             select(Hospital).where(Hospital.is_active == True).order_by(Hospital.name)
         )

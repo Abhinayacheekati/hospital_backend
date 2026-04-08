@@ -2,6 +2,7 @@
 Authentication schemas for login, registration, and user management.
 """
 from typing import Optional, List
+from uuid import UUID
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -50,10 +51,10 @@ class PatientRegistrationCreate(BaseModel):
     first_name: str = Field(..., min_length=2, max_length=100)
     last_name: str = Field(..., min_length=2, max_length=100)
     password: str = Field(..., min_length=8, max_length=128)
-    # Optional for UX: if omitted, hospital will be auto-resolved when possible
-    hospital_name: Optional[str] = Field(
+    # Optional: if omitted, hospital will be auto-resolved when possible (see GET /auth/hospitals for UUIDs)
+    hospital_id: Optional[UUID] = Field(
         None,
-        description="Hospital name where patient wants to register (optional if only one hospital is active)"
+        description="Hospital UUID where the patient registers (from GET /api/v1/auth/hospitals). Optional if only one active hospital exists.",
     )
     
     # Patient profile fields
@@ -119,6 +120,7 @@ class UserInfoOut(BaseModel):
 
 class HospitalOut(BaseModel):
     """Hospital information data"""
+    id: str
     name: str
     city: str
     state: str
