@@ -6,6 +6,7 @@ Email service using SendGrid SMTP - Render-optimized
 import aiosmtplib
 import asyncio
 import base64
+import html as html_lib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
@@ -132,6 +133,38 @@ class EmailService:
             logger.error(f"❌ Send failed: {e}")
             return False
 
+    def is_smtp_configured(self) -> bool:
+        """True when env has SMTP credentials (SendGrid or other provider)."""
+        return bool((self.smtp_user or "").strip() and (self.smtp_pass or "").strip())
+
+    async def send_email_with_retry(
+        self,
+        to_email: str,
+        subject: str,
+        html_content: str,
+        text_content: Optional[str] = None,
+        *,
+        rounds: int = 5,
+        timeout: int = 30,
+        base_delay_sec: float = 1.0,
+    ) -> bool:
+        """
+        Same as send_email but repeats full multi-port attempts several times with backoff.
+        Use for operations where delivery must succeed whenever SMTP is healthy.
+        """
+        if not self.is_smtp_configured():
+            logger.error("❌ SMTP credentials missing")
+            return False
+        for round_i in range(max(1, rounds)):
+            if round_i > 0:
+                delay = base_delay_sec * (2 ** (round_i - 1))
+                logger.info("📧 Retrying email to %s after %.1fs (round %s/%s)", to_email, delay, round_i + 1, rounds)
+                await asyncio.sleep(min(delay, 30.0))
+            if await self.send_email(to_email, subject, html_content, text_content, timeout=timeout):
+                return True
+            logger.warning("⚠️ Email round %s/%s failed for %s", round_i + 1, rounds, to_email)
+        return False
+
     async def send_document_email(
         self,
         to_email: str,
@@ -237,3 +270,68 @@ class EmailService:
         """
         text = f"Hi {first_name},\n\nYour password reset code: {otp_code}\n\nExpires in 10 minutes.\n\nBest regards,\nHospital Management Team"
         return await self.send_email(email, "Password Reset - Hospital Management", html, text)
+
+    async def send_patient_portal_credentials_email(
+        self,
+        to_email: str,
+        first_name: str,
+        login_email: str,
+        password_plain: str,
+        hospital_name: Optional[str] = None,
+    ) -> bool:
+        """
+        Sent after receptionist registers a patient with a portal password.
+        Includes login email and password so the patient can use patient login immediately.
+        """
+        fn = html_lib.escape(first_name or "Patient")
+        em = html_lib.escape(login_email or "")
+        pw = html_lib.escape(password_plain or "")
+        hosp_line = ""
+        hosp_text = ""
+        if hospital_name and str(hospital_name).strip():
+            h = html_lib.escape(str(hospital_name).strip())
+            hosp_line = f'<p style="color:#2c3e50;">You were registered at <strong>{h}</strong>.</p>'
+            hosp_text = f"You were registered at {hospital_name.strip()}.\n\n"
+
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <div style="background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
+                <h1 style="color: white; margin: 0;">🏥 Your patient portal login</h1>
+            </div>
+            <div style="background: #f8f9fa; padding: 40px 30px; border-radius: 0 0 10px 10px;">
+                <h2 style="color: #2c3e50; margin-top: 0;">Hi {fn},</h2>
+                {hosp_line}
+                <p>Your account is ready. Use these credentials to sign in as a patient (same login as online registration):</p>
+                <div style="background: white; padding: 20px; border-radius: 8px; margin: 20px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.08);">
+                    <p style="margin: 8px 0;"><strong>Email (login ID):</strong><br>
+                    <span style="font-family: monospace; font-size: 15px;">{em}</span></p>
+                    <p style="margin: 8px 0;"><strong>Password:</strong><br>
+                    <span style="font-family: monospace; font-size: 15px;">{pw}</span></p>
+                </div>
+                <p style="color:#666; font-size: 14px;">Please change your password after first login if your hospital offers that option. Do not share this email.</p>
+                <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
+                <p>Best regards,<br><strong>Hospital Management Team</strong></p>
+            </div>
+        </body>
+        </html>
+        """
+        text = (
+            f"Hi {first_name or 'Patient'},\n\n"
+            f"{hosp_text}"
+            "Your patient portal login:\n\n"
+            f"Email (login ID): {login_email}\n"
+            f"Password: {password_plain}\n\n"
+            "Use these with the patient sign-in in your hospital's app or website.\n\n"
+            "Hospital Management Team"
+        )
+        return await self.send_email_with_retry(
+            to_email,
+            "Your patient portal login details",
+            html,
+            text,
+            rounds=5,
+            timeout=30,
+            base_delay_sec=1.25,
+        )

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_, func
 from sqlalchemy.orm import selectinload
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from app.core.database import get_db_session
 from app.models.hospital import Department
@@ -19,8 +19,25 @@ from app.core.enums import AppointmentStatus, UserRole, UserStatus
 from app.core.utils import generate_appointment_ref
 from app.core.security import get_current_user
 from app.schemas.patient_care import AppointmentBookingCreate, AppointmentCancellationCreate
+from app.services.appointment_service import AppointmentService
 
 router = APIRouter(prefix="/patient-appointment-booking", tags=["Patient Portal - Appointment Booking"])
+
+
+def _normalize_patient_booking_time(raw: str) -> tuple[str, str]:
+    """Return (HH:MM for schedule matching, HH:MM:SS for DB)."""
+    raw = (raw or "").strip()
+    parts = [p for p in raw.split(":") if p != ""]
+    if len(parts) >= 3:
+        h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
+    elif len(parts) >= 2:
+        h, m, s = int(parts[0]), int(parts[1]), 0
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid appointment_time; use HH:MM or HH:MM:SS",
+        )
+    return f"{h:02d}:{m:02d}", f"{h:02d}:{m:02d}:{s:02d}"
 
 
 async def get_current_patient(
@@ -237,61 +254,25 @@ async def get_doctor_available_slots(
             detail=f"Doctor '{doctor_name}' not found in your hospital"
         )
     
-    # Parse date and get day of week
     try:
-        appointment_date = datetime.fromisoformat(date)
-        day_of_week = appointment_date.strftime('%A').upper()
+        datetime.fromisoformat(date)
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid date format. Use YYYY-MM-DD"
         )
-    
-    # Since we don't have doctor schedules, create default availability
-    # Generate basic time slots from 9 AM to 5 PM (every 30 minutes)
-    slots = []
-    start_time = datetime.combine(appointment_date.date(), datetime.strptime("09:00", "%H:%M").time())
-    end_time = datetime.combine(appointment_date.date(), datetime.strptime("17:00", "%H:%M").time())
-    current_time = start_time
-    
-    while current_time < end_time:
-        # Skip lunch break (12:00 - 13:00)
-        if current_time.time() >= datetime.strptime("12:00", "%H:%M").time() and current_time.time() < datetime.strptime("13:00", "%H:%M").time():
-            current_time += timedelta(minutes=30)
-            continue
-        
-        # Skip past times for today
-        if appointment_date.date() == datetime.now().date() and current_time <= datetime.now():
-            current_time += timedelta(minutes=30)
-            continue
-        
-        # Check if slot is already booked
-        existing_appointment = await db.execute(
-            select(Appointment)
-            .where(
-                and_(
-                    Appointment.doctor_id == doctor.id,
-                    Appointment.appointment_date == date,
-                    Appointment.appointment_time == current_time.strftime('%H:%M:%S'),
-                    Appointment.status.in_([AppointmentStatus.REQUESTED, AppointmentStatus.CONFIRMED])
-                )
-            )
-        )
-        
-        is_available = existing_appointment.scalar_one_or_none() is None
-        
-        slots.append({
-            "time": current_time.strftime('%H:%M'),
-            "is_available": is_available
-        })
-        
-        current_time += timedelta(minutes=30)
-    
+
+    svc = AppointmentService(db)
+    slots = await svc.get_available_time_slots_for_doctor_user(doctor.id, date)
+
     return {
         "doctor_name": f"Dr. {doctor.first_name} {doctor.last_name}",
         "hospital_name": hospital.name,
         "date": date,
-        "available_slots": slots
+        "available_slots": [
+            {"time": s["time"], "is_available": s["is_available"], "duration_minutes": s.get("duration_minutes", 30)}
+            for s in slots
+        ],
     }
 
 
@@ -375,15 +356,44 @@ async def book_appointment(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Doctor '{data['doctor_name']}' not found in {data['department_name']} department at {hospital.name}"
         )
-    
-    # Check if time slot is available
+
+    try:
+        time_hhmm, time_hhmmss = _normalize_patient_booking_time(data["appointment_time"])
+    except HTTPException:
+        raise
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid appointment_time; use HH:MM or HH:MM:SS",
+        )
+
+    svc = AppointmentService(db)
+    day_slots = await svc.get_available_time_slots_for_doctor_user(doctor.id, data["appointment_date"])
+    if not day_slots:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This doctor has no published availability on that day. Pick another date or use available-slots.",
+        )
+    match = next((s for s in day_slots if s["time"] == time_hhmm), None)
+    if not match:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Selected time is outside this doctor's schedule. Choose a time from GET .../available-slots.",
+        )
+    if not match["is_available"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Time slot is not available",
+        )
+
+    # Check if time slot is available (race safety)
     existing_appointment = await db.execute(
         select(Appointment)
         .where(
             and_(
                 Appointment.doctor_id == doctor.id,
                 Appointment.appointment_date == data['appointment_date'],
-                Appointment.appointment_time == f"{data['appointment_time']}:00",
+                Appointment.appointment_time == time_hhmmss,
                 Appointment.status.in_([AppointmentStatus.REQUESTED, AppointmentStatus.CONFIRMED])
             )
         )
@@ -424,8 +434,8 @@ async def book_appointment(
         department_id=department.id,
         hospital_id=hospital.id,  # Use the specified hospital
         appointment_date=data['appointment_date'],
-        appointment_time=f"{data['appointment_time']}:00",
-        duration_minutes=30,
+        appointment_time=time_hhmmss,
+        duration_minutes=int(match.get("duration_minutes") or 30),
         status=AppointmentStatus.REQUESTED,
         chief_complaint=data['chief_complaint'],
         consultation_fee=500.0,  # Default consultation fee

@@ -118,8 +118,12 @@ except ImportError as e:
 try:
     from app.api.v1.routers.management.nurse_management import router as nurse_management_router
     from app.api.v1.routers.management.receptionist_management import router as receptionist_management_router
+    from app.api.v1.routers.management.staff_doctor_schedules import (
+        router as staff_doctor_schedules_router,
+    )
     api_router.include_router(nurse_management_router)
     api_router.include_router(receptionist_management_router)
+    api_router.include_router(staff_doctor_schedules_router)
     logger.info("✓ Management routers loaded")
 except ImportError as e:
     logger.error(f"✗ Failed to load management routers: {e}")

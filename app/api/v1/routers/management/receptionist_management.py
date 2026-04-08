@@ -71,14 +71,17 @@ async def register_patient(
     - Only Receptionists can register patients
     
     Workflow:
-    1. Create User account
+    1. Create User account (optional `password` + `email` enables portal login via POST /auth/patient/login)
     2. Create PatientProfile
     3. Assign patient ID
     4. Set hospital association
     
+    If `password` is omitted, a one-time `temp_password` is returned (email remains unverified for patient login).
+    If `password` is set, login details are emailed before the transaction commits (SMTP must be configured).
+    Email is retried automatically; if delivery still fails, registration is rolled back and returns 503.
+    
     Returns:
-    - Patient ID
-    - User ID
+    - Patient ID, optional temp_password or portal_login_enabled, `credentials_email_sent: true` when portal + email
     - Registration confirmation
     """
     clinical_service = ClinicalService(db)
@@ -97,24 +100,25 @@ async def schedule_appointment(
     db: AsyncSession = Depends(get_db_session)
 ):
     """
-    Schedule appointment for patient.
+    Schedule appointment for an existing patient.
+    
+    Register new patients first: POST /receptionist/patients/register, then pass `patient_ref` here
+    with doctor, department, date, and time.
     
     Access Control:
-    - Only Receptionists can schedule appointments
+    - Receptionist (or authenticated user with access to this router)
     
     Features:
-    - Can register new patient and schedule in one step
     - Conflict detection
-    - Doctor availability check
-    - Department validation
+    - Doctor / department validation
     
     Returns:
-    - Appointment ID
-    - Appointment details
-    - Confirmation
+    - appointment_ref and scheduling confirmation
     """
     clinical_service = ClinicalService(db)
-    result = await clinical_service.schedule_opd_appointment(appointment_data.dict(), current_user)
+    result = await clinical_service.schedule_opd_appointment(
+        appointment_data.model_dump(), current_user
+    )
     return success_response(message="Appointment scheduled successfully", data=result)
 
 
