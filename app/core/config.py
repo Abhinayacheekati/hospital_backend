@@ -198,6 +198,8 @@ class Settings(BaseSettings):
 
         if async_url and not sync_url:
             sync_url = self._to_sync_url(async_url)
+            # DATABASE_URL may be mistakenly set to a sync driver (e.g. +psycopg2); always coerce async.
+            async_url = self._to_async_url(async_url)
         elif sync_url and not async_url:
             async_url = self._to_async_url(sync_url)
         else:
@@ -219,6 +221,8 @@ class Settings(BaseSettings):
             value = value.replace("postgres://", "postgresql+asyncpg://", 1)
         elif value.startswith("postgresql+psycopg2://"):
             value = value.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
+        elif value.startswith("postgresql+psycopg://"):
+            value = value.replace("postgresql+psycopg://", "postgresql+asyncpg://", 1)
         elif value.startswith("postgresql://"):
             value = value.replace("postgresql://", "postgresql+asyncpg://", 1)
         return value
@@ -230,6 +234,10 @@ class Settings(BaseSettings):
             value = value.replace("postgres://", "postgresql://", 1)
         elif value.startswith("postgresql+asyncpg://"):
             value = value.replace("postgresql+asyncpg://", "postgresql://", 1)
+        elif value.startswith("postgresql+psycopg2://"):
+            value = value.replace("postgresql+psycopg2://", "postgresql://", 1)
+        elif value.startswith("postgresql+psycopg://"):
+            value = value.replace("postgresql+psycopg://", "postgresql://", 1)
         return value
 
     @staticmethod
