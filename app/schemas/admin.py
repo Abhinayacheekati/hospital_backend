@@ -173,8 +173,54 @@ class StaffCreate(BaseModel):
     doctor_specialization: Optional[str] = Field(
         None,
         max_length=255,
-        description="Optional; for doctors defaults to department name",
+        description="Optional; for doctors defaults to department name or General",
     )
+    department_name: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=100,
+        description=(
+            "For DOCTOR only: existing department name in this hospital. "
+            "When set, creates doctor profile + primary department assignment on create."
+        ),
+    )
+    doctor_experience_years: Optional[int] = Field(
+        None,
+        ge=0,
+        le=70,
+        description="For DOCTOR only: years of professional experience",
+    )
+    consultation_fee: Optional[float] = Field(
+        None,
+        ge=0,
+        description="For DOCTOR only: standard consultation fee",
+    )
+    consultation_type: Optional[str] = Field(
+        None,
+        max_length=100,
+        description="For DOCTOR only: e.g. IN_PERSON, ONLINE, HYBRID",
+    )
+    availability_time: Optional[str] = Field(
+        None,
+        max_length=2000,
+        description="For DOCTOR only: human-readable availability (e.g. Mon-Fri 09:00-17:00)",
+    )
+
+    @model_validator(mode="after")
+    def _doctor_only_professional_fields(self):
+        role = (self.role or "").strip().upper()
+        if role != "DOCTOR":
+            if self.department_name and str(self.department_name).strip():
+                raise ValueError("department_name is only allowed when role is DOCTOR")
+            if self.doctor_experience_years is not None:
+                raise ValueError("doctor_experience_years is only allowed when role is DOCTOR")
+            if self.consultation_fee is not None:
+                raise ValueError("consultation_fee is only allowed when role is DOCTOR")
+            if self.consultation_type and str(self.consultation_type).strip():
+                raise ValueError("consultation_type is only allowed when role is DOCTOR")
+            if self.availability_time and str(self.availability_time).strip():
+                raise ValueError("availability_time is only allowed when role is DOCTOR")
+        return self
 
     @field_validator("emergency_contact", "joining_date", "address", "shift_timing", mode="before")
     @classmethod

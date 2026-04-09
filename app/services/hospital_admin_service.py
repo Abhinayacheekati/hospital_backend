@@ -5,6 +5,7 @@ CRITICAL: All operations are scoped to the hospital_id from JWT token.
 """
 import uuid
 import random
+from decimal import Decimal
 from datetime import date, datetime, timedelta
 from typing import Optional, Dict, Any, List
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -591,10 +592,22 @@ class HospitalAdminService:
                 detail={"code": "ROLE_NOT_FOUND", "message": f"Role {role_name} not found"},
             )
 
-        # Staff is created without department assignment.
-        # Department assignment happens via the separate assign-staff-to-department API.
-        department = None
+        department_for_create = None
         dept_label = "GENERAL"
+        if role_name == UserRole.DOCTOR and (staff_data.get("department_name") or "").strip():
+            dn = (staff_data.get("department_name") or "").strip()
+            department_for_create = await self._get_department_by_name(dn)
+            if not department_for_create:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={
+                        "code": "DEPARTMENT_NOT_FOUND",
+                        "message": f"Department '{dn}' not found in this hospital",
+                    },
+                )
+            dept_label = department_for_create.name
+
+        department = department_for_create
 
         joining_iso = _parse_joining_date_iso(staff_data.get("joining_date"))
         shift_type = _shift_type_from_timing(staff_data.get("shift_timing"))
@@ -607,7 +620,33 @@ class HospitalAdminService:
             extra_md["joining_date"] = joining_iso
         if staff_data.get("address"):
             extra_md["address"] = staff_data["address"].strip()
-        # No department info stored at create-time.
+
+        spec = (
+            (staff_data.get("doctor_specialization") or "").strip()
+            or (staff_data.get("specialization") or "").strip()
+            or "General"
+        )
+        if role_name == UserRole.DOCTOR:
+            extra_md["doctor_specialization"] = spec
+            extra_md["specialization"] = spec
+            ey = staff_data.get("doctor_experience_years")
+            if ey is not None:
+                try:
+                    extra_md["doctor_experience_years"] = max(0, int(ey))
+                except (TypeError, ValueError):
+                    extra_md["doctor_experience_years"] = 0
+            cf = staff_data.get("consultation_fee")
+            if cf is not None:
+                try:
+                    extra_md["consultation_fee"] = float(cf)
+                except (TypeError, ValueError):
+                    pass
+            ct = (staff_data.get("consultation_type") or "").strip()
+            if ct:
+                extra_md["consultation_type"] = ct
+            av = (staff_data.get("availability_time") or "").strip()
+            if av:
+                extra_md["availability_time"] = av
 
         password_hash = self.security.hash_password(staff_data["password"])
         staff_id = generate_staff_id(
@@ -650,17 +689,14 @@ class HospitalAdminService:
         )
 
         profiles_created: list[str] = []
-        spec = (
-            (staff_data.get("doctor_specialization") or "").strip()
-            or (staff_data.get("specialization") or "").strip()
-            or "General"
-        )
-        if role_name == UserRole.DOCTOR:
-            extra_md["doctor_specialization"] = spec
-            extra_md["specialization"] = spec
-            user.user_metadata = extra_md
 
-        if role_name == UserRole.DOCTOR and department:
+        if role_name == UserRole.DOCTOR and department_for_create:
+            from app.models.hospital import StaffDepartmentAssignment, StaffProfile
+            from app.core.utils import parse_date_string
+
+            effective_from = parse_date_string(staff_data.get("joining_date")) or datetime.utcnow()
+            join_date_str = joining_iso or effective_from.date().isoformat()
+
             has_doc = await self.db.execute(
                 select(DoctorProfile.id).where(
                     and_(
@@ -670,6 +706,48 @@ class HospitalAdminService:
                 )
             )
             if not has_doc.scalar_one_or_none():
+                exp_years = int(extra_md.get("doctor_experience_years", 0) or 0)
+                cf_raw = extra_md.get("consultation_fee", 0)
+                try:
+                    cfee = Decimal(str(cf_raw if cf_raw is not None else 0))
+                except Exception:
+                    cfee = Decimal("0")
+                ct = extra_md.get("consultation_type")
+                avt = extra_md.get("availability_time")
+
+                sp = StaffProfile(
+                    id=uuid.uuid4(),
+                    hospital_id=self.hospital_id,
+                    user_id=user.id,
+                    department_id=department_for_create.id,
+                    employee_id=user.staff_id or user.email,
+                    designation="Doctor",
+                    joining_date=join_date_str,
+                    qualification=None,
+                    experience_years=exp_years,
+                    specialization=spec,
+                    emergency_contact_name=None,
+                    emergency_contact_phone=None,
+                    emergency_contact_relation=None,
+                    is_full_time=True,
+                    salary=None,
+                    skills=[],
+                    certifications=[],
+                )
+                self.db.add(sp)
+
+                assignment = StaffDepartmentAssignment(
+                    id=uuid.uuid4(),
+                    hospital_id=self.hospital_id,
+                    staff_id=user.id,
+                    department_id=department_for_create.id,
+                    is_primary=True,
+                    effective_from=effective_from,
+                    notes=None,
+                    is_active=True,
+                )
+                self.db.add(assignment)
+
                 doc_ref = user.staff_id or f"DOC{str(uuid.uuid4())[:8].upper()}"
                 lic = f"AUTO-ML-{self.hospital_id.hex[:8]}-{uuid.uuid4().hex[:10]}".upper()
                 self.db.add(
@@ -677,18 +755,20 @@ class HospitalAdminService:
                         id=uuid.uuid4(),
                         hospital_id=self.hospital_id,
                         user_id=user.id,
-                        department_id=department.id,
+                        department_id=department_for_create.id,
                         doctor_id=doc_ref,
                         medical_license_number=lic,
                         designation="Staff Physician",
                         specialization=spec,
                         sub_specialization=None,
-                        experience_years=0,
+                        experience_years=exp_years,
                         qualifications=[],
                         certifications=[],
                         medical_associations=[],
-                        consultation_fee=0,
+                        consultation_fee=cfee,
                         follow_up_fee=None,
+                        consultation_type=ct,
+                        availability_time=avt,
                         is_available_for_emergency=False,
                         is_accepting_new_patients=True,
                         bio=None,
@@ -696,6 +776,14 @@ class HospitalAdminService:
                     )
                 )
                 profiles_created.append("doctor_profile")
+                profiles_created.append("staff_profile")
+                profiles_created.append("department_assignment")
+
+                extra_md["department_id"] = str(department_for_create.id)
+                extra_md["department_name"] = department_for_create.name
+                user.user_metadata = extra_md
+        elif role_name == UserRole.DOCTOR:
+            user.user_metadata = extra_md
 
         if role_name == UserRole.NURSE and department:
             has_nurse = await self.db.execute(
@@ -751,24 +839,39 @@ class HospitalAdminService:
                 )
                 profiles_created.append("receptionist_profile")
 
+        resp_user_id = str(user.id)
+        resp_staff_id = user.staff_id
+        resp_email = user.email
+        resp_first = user.first_name
+        resp_last = user.last_name
         await self.db.commit()
 
-        staff_name = f"{user.first_name} {user.last_name}"
+        staff_name = f"{resp_first} {resp_last}"
         if role_name == UserRole.DOCTOR:
             staff_name = f"Dr. {staff_name}"
         elif role_name == UserRole.NURSE:
             staff_name = f"Nurse {staff_name}"
 
-        return {
-            "user_id": str(user.id),
-            "staff_id": user.staff_id,
+        out: Dict[str, Any] = {
+            "user_id": resp_user_id,
+            "staff_id": resp_staff_id,
             "staff_name": staff_name,
-            "email": user.email,
+            "email": resp_email,
             "role": role_name,
             "joining_date": joining_iso,
             "profiles_created": profiles_created,
             "message": f"{role_name.replace('_', ' ').title()} created successfully",
         }
+        if role_name == UserRole.DOCTOR:
+            out["doctor_details"] = {
+                "department_name": (extra_md.get("department_name")),
+                "doctor_experience_years": extra_md.get("doctor_experience_years"),
+                "consultation_fee": extra_md.get("consultation_fee"),
+                "consultation_type": extra_md.get("consultation_type"),
+                "availability_time": extra_md.get("availability_time"),
+                "specialization": spec,
+            }
+        return out
     
     async def get_staff_users(
         self, 
@@ -4612,6 +4715,11 @@ class HospitalAdminService:
         
         self.db.add(assignment)
 
+        md = dict(staff_member.user_metadata or {})
+        md["department_id"] = str(department.id)
+        md["department_name"] = department.name
+        staff_member.user_metadata = md
+
         # ------------------------------------------------------------------
         # AUTO-CREATE DOCTOR PROFILE WHEN DOCTOR IS ASSIGNED TO DEPARTMENT
         # ------------------------------------------------------------------
@@ -4630,8 +4738,16 @@ class HospitalAdminService:
             existing_profile = existing_profile_result.scalar_one_or_none()
 
             if not existing_profile:
-                # Reuse staff_id as doctor_id for consistency
                 doctor_id = staff_member.staff_id or f"DOC{str(uuid.uuid4())[:8].upper()}"
+                exp_years = int(md.get("doctor_experience_years", 0) or 0)
+                try:
+                    cfee = Decimal(str(md.get("consultation_fee", 0) or 0))
+                except Exception:
+                    cfee = Decimal("0")
+                spec_from_md = (
+                    (md.get("doctor_specialization") or md.get("specialization") or "").strip()
+                    or department.name
+                )
 
                 minimal_profile = DoctorProfile(
                     id=uuid.uuid4(),
@@ -4641,14 +4757,16 @@ class HospitalAdminService:
                     doctor_id=doctor_id,
                     medical_license_number=f"AUTO-{doctor_id}",
                     designation="Doctor",
-                    specialization=department.name,
+                    specialization=spec_from_md,
                     sub_specialization=None,
-                    experience_years=0,
+                    experience_years=exp_years,
                     qualifications=[],
                     certifications=[],
                     medical_associations=[],
-                    consultation_fee=0,
+                    consultation_fee=cfee,
                     follow_up_fee=None,
+                    consultation_type=md.get("consultation_type"),
+                    availability_time=md.get("availability_time"),
                     is_available_for_emergency=False,
                     is_accepting_new_patients=True,
                     bio=None,
@@ -4661,11 +4779,6 @@ class HospitalAdminService:
         receptionist_profile_created = False
         from app.models.nurse import NurseProfile
         from app.models.receptionist import ReceptionistProfile
-
-        md = dict(staff_member.user_metadata or {})
-        md["department_id"] = str(department.id)
-        md["department_name"] = department.name
-        staff_member.user_metadata = md
 
         shift_type = _shift_type_from_timing(md.get("shift_timing"))
 

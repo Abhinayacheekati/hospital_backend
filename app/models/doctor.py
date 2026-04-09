@@ -39,6 +39,8 @@ class DoctorProfile(TenantBaseModel):
     # Consultation details
     consultation_fee = Column(DECIMAL(10, 2), nullable=False)
     follow_up_fee = Column(DECIMAL(10, 2))
+    consultation_type = Column(String(100))  # e.g. IN_PERSON, ONLINE, HYBRID
+    availability_time = Column(Text)  # e.g. "Mon-Fri 09:00-17:00" or JSON string
     
     # Availability
     is_available_for_emergency = Column(Boolean, default=False)
