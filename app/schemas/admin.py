@@ -308,6 +308,12 @@ class BedCreate(BaseModel):
 class BedStatusUpdate(BaseModel):
     """Bed status update request"""
     status: str = Field(..., description="New bed status (AVAILABLE, OCCUPIED, MAINTENANCE, RESERVED)")
+    maintenance_notes: Optional[str] = Field(
+        None, description="Notes when moving to MAINTENANCE"
+    )
+    patient_id: Optional[str] = Field(
+        None, description="Patient profile UUID when marking bed as OCCUPIED"
+    )
 
 
 class AdmissionCreate(BaseModel):
