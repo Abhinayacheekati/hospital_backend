@@ -2396,70 +2396,166 @@ class HospitalAdminService:
         }
     
     async def update_ward(self, ward_id: uuid.UUID, update_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Update ward information"""
+        """Update ward information.
+
+        Maps WardUpdate / API field names to SQLAlchemy columns. Never assigns relationship
+        names like ``head_nurse`` directly (that triggers async MissingGreenlet).
+        """
         from app.models.hospital import Ward
-        
-        # Get ward
+        from app.core.utils import parse_time_string
+
         result = await self.db.execute(
             select(Ward).where(
                 and_(
                     Ward.id == ward_id,
-                    Ward.hospital_id == self.hospital_id
+                    Ward.hospital_id == self.hospital_id,
                 )
             )
         )
         ward = result.scalar_one_or_none()
-        
+
         if not ward:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail={"code": "WARD_NOT_FOUND", "message": "Ward not found"}
+                detail={"code": "WARD_NOT_FOUND", "message": "Ward not found"},
             )
-        
-        # Check if code is being changed and ensure uniqueness
-        if "code" in update_data and update_data["code"] != ward.code:
+
+        data = dict(update_data)
+
+        if "code" in data and data["code"] is not None and data["code"] != ward.code:
             existing_ward = await self.db.execute(
                 select(Ward).where(
                     and_(
                         Ward.hospital_id == self.hospital_id,
-                        Ward.code == update_data["code"],
-                        Ward.id != ward_id
+                        Ward.code == data["code"],
+                        Ward.id != ward_id,
                     )
                 )
             )
             if existing_ward.scalar_one_or_none():
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail={"code": "WARD_CODE_EXISTS", "message": "Ward with this code already exists"}
+                    detail={"code": "WARD_CODE_EXISTS", "message": "Ward with this code already exists"},
                 )
-        
-        # Validate head nurse if being changed
-        if "head_nurse_id" in update_data:
-            head_nurse_id = update_data["head_nurse_id"]
-            if head_nurse_id:
-                head_nurse = await self._get_hospital_staff_user(uuid.UUID(head_nurse_id))
+
+        # head_nurse (API) -> head_nurse_id (FK). Do not setattr(head_nurse, ...) on the model.
+        if "head_nurse" in data:
+            hn_raw = data.pop("head_nurse")
+            if hn_raw is not None and str(hn_raw).strip():
+                hn_name = str(hn_raw).strip()
+                head_nurse_user = await self._get_staff_by_name(hn_name)
+                if not head_nurse_user:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail={
+                            "code": "HEAD_NURSE_NOT_FOUND",
+                            "message": f"Nurse '{hn_name}' not found in this hospital",
+                        },
+                    )
+                nurse_roles = [r.name for r in head_nurse_user.roles]
+                if UserRole.NURSE not in nurse_roles:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={
+                            "code": "NOT_A_NURSE",
+                            "message": f"Staff member '{hn_name}' is not a nurse",
+                        },
+                    )
+                data["head_nurse_id"] = head_nurse_user.id
+            else:
+                data["head_nurse_id"] = None
+
+        if "head_nurse_id" in data:
+            hid = data["head_nurse_id"]
+            if hid:
+                head_nurse = await self._get_hospital_staff_user(
+                    hid if isinstance(hid, uuid.UUID) else uuid.UUID(str(hid))
+                )
                 if not head_nurse:
                     raise HTTPException(
                         status_code=status.HTTP_404_NOT_FOUND,
-                        detail={"code": "HEAD_NURSE_NOT_FOUND", "message": "Head nurse not found in this hospital"}
+                        detail={"code": "HEAD_NURSE_NOT_FOUND", "message": "Head nurse not found in this hospital"},
                     )
-                update_data["head_nurse_id"] = uuid.UUID(head_nurse_id)
+                data["head_nurse_id"] = (
+                    hid if isinstance(hid, uuid.UUID) else uuid.UUID(str(hid))
+                )
             else:
-                update_data["head_nurse_id"] = None
-        
-        # Parse time strings for visiting hours
-        if "visiting_hours_start" in update_data and update_data["visiting_hours_start"]:
-            from app.core.utils import parse_time_string
-            update_data["visiting_hours_start"] = parse_time_string(update_data["visiting_hours_start"])
-        if "visiting_hours_end" in update_data and update_data["visiting_hours_end"]:
-            from app.core.utils import parse_time_string
-            update_data["visiting_hours_end"] = parse_time_string(update_data["visiting_hours_end"])
-        
-        # Update fields
-        for field, value in update_data.items():
-            if hasattr(ward, field) and value is not None:
-                setattr(ward, field, value)
-        
+                data["head_nurse_id"] = None
+
+        if "phone" in data and data["phone"] is not None:
+            data["nurse_station_phone"] = data.pop("phone")
+
+        if "floor_number" in data and data["floor_number"] is not None:
+            data["floor"] = str(data.pop("floor_number"))
+
+        if "nurse_station_location" in data:
+            loc = data.pop("nurse_station_location")
+            if loc is not None:
+                data["location_details"] = loc
+
+        for api_key, model_key in (
+            ("emergency_access", "is_emergency_accessible"),
+            ("isolation_capability", "is_isolation_ward"),
+            ("oxygen_supply", "has_oxygen_supply"),
+        ):
+            if api_key in data:
+                data[model_key] = bool(data.pop(api_key))
+
+        facilities_update = data.pop("facilities", None)
+        if facilities_update is not None:
+            st = dict(ward.settings or {})
+            st["facilities"] = facilities_update
+            ward.settings = st
+
+        visiting_hours_start = None
+        visiting_hours_end = None
+        if data.get("visiting_hours_start") or data.get("visiting_hours_end"):
+            if data.get("visiting_hours_start"):
+                visiting_hours_start = parse_time_string(str(data.pop("visiting_hours_start")))
+            if data.get("visiting_hours_end"):
+                visiting_hours_end = parse_time_string(str(data.pop("visiting_hours_end")))
+        elif data.get("visiting_hours"):
+            raw = str(data.pop("visiting_hours"))
+            parts = raw.split("-")
+            if len(parts) == 2:
+                try:
+                    visiting_hours_start = parse_time_string(parts[0].strip())
+                    visiting_hours_end = parse_time_string(parts[1].strip())
+                except Exception:
+                    visiting_hours_start = None
+                    visiting_hours_end = None
+        if visiting_hours_start is not None:
+            data["visiting_hours_start"] = visiting_hours_start
+        if visiting_hours_end is not None:
+            data["visiting_hours_end"] = visiting_hours_end
+
+        allowed_columns = {
+            "name",
+            "code",
+            "ward_type",
+            "description",
+            "floor",
+            "building",
+            "location_details",
+            "total_beds",
+            "nurse_station_phone",
+            "head_nurse_id",
+            "is_isolation_ward",
+            "is_emergency_accessible",
+            "visiting_hours_start",
+            "visiting_hours_end",
+            "has_oxygen_supply",
+            "has_suction",
+            "has_cardiac_monitor",
+            "has_ventilator_support",
+            "settings",
+        }
+
+        for field, value in list(data.items()):
+            if field not in allowed_columns:
+                continue
+            setattr(ward, field, value)
+
         ward.updated_at = datetime.utcnow()
         ward_id_str = str(ward.id)
         await self.db.commit()
@@ -2619,7 +2715,7 @@ class HospitalAdminService:
         # Build query with hospital filter
         query = select(Bed).options(
             selectinload(Bed.ward),
-            selectinload(Bed.current_patient)
+            selectinload(Bed.current_patient).selectinload(PatientProfile.user),
         ).where(Bed.hospital_id == self.hospital_id)
         
         # Filter by ward
@@ -2959,15 +3055,20 @@ class HospitalAdminService:
         )
         
         self.db.add(admission)
+        admission_id_str = str(admission.id)
+        admission_status = (
+            getattr(admission, "status", "PENDING") if hasattr(admission, "status") else "PENDING"
+        )
+        patient_ref_out = getattr(patient, "patient_id", None) or str(patient_id)
         await self.db.commit()
-        
+
         return {
-            "admission_id": str(admission.id),
-            "admission_number": admission.admission_number,
-            "patient_ref": getattr(patient, "patient_id", None) or str(patient_id),
+            "admission_id": admission_id_str,
+            "admission_number": admission_number,
+            "patient_ref": patient_ref_out,
             "doctor_id": str(doctor_id),
-            "status": getattr(admission, "status", "PENDING") if hasattr(admission, "status") else "PENDING",
-            "message": "Admission created successfully"
+            "status": admission_status,
+            "message": "Admission created successfully",
         }
     
     async def assign_bed_to_admission(
@@ -3057,17 +3158,29 @@ class HospitalAdminService:
         bed.updated_at = datetime.utcnow()
         
         admission.updated_at = datetime.utcnow()
+
+        admission_id_str = str(admission.id)
+        admission_number_out = admission.admission_number
+        pu = admission.patient.user if admission.patient and admission.patient.user else None
+        patient_name_out = f"{pu.first_name} {pu.last_name}" if pu else "Unknown"
+        bed_code_out = bed.bed_code
+        ward_name_out = bed.ward.name if bed.ward else None
+        admission_status_out = admission.status
+        assigned_at_out = getattr(
+            admission, "actual_admission_date", datetime.utcnow().date().isoformat()
+        )
+
         await self.db.commit()
-        
+
         return {
-            "admission_id": str(admission.id),
-            "admission_number": admission.admission_number,
-            "patient_name": f"{admission.patient.user.first_name} {admission.patient.user.last_name}",
-            "bed_code": bed.bed_code,
-            "ward_name": bed.ward.name,
-            "status": admission.status,
-            "assigned_at": getattr(admission, "actual_admission_date", datetime.utcnow().date().isoformat()),
-            "message": "Bed assigned successfully and patient admitted"
+            "admission_id": admission_id_str,
+            "admission_number": admission_number_out,
+            "patient_name": patient_name_out,
+            "bed_code": bed_code_out,
+            "ward_name": ward_name_out,
+            "status": admission_status_out,
+            "assigned_at": assigned_at_out,
+            "message": "Bed assigned successfully and patient admitted",
         }
     
     async def discharge_patient(
@@ -3167,21 +3280,42 @@ class HospitalAdminService:
             if hasattr(Admission, "discharge_summary_id"):
                 admission.discharge_summary_id = discharge_summary.id
             discharge_summary_id = str(discharge_summary.id)
-        
+
+        admission_id_str = str(admission.id)
+        admission_number_out = admission.admission_number
+        u = (
+            admission.patient.user
+            if admission.patient and getattr(admission.patient, "user", None)
+            else None
+        )
+        patient_name_out = f"{u.first_name} {u.last_name}" if u else "Unknown"
+        bed_code_out = admission.bed.bed_code if admission.bed else None
+        ward_name_out = (
+            admission.bed.ward.name
+            if admission.bed and getattr(admission.bed, "ward", None)
+            else None
+        )
+        discharge_date_out = (
+            admission.discharge_date.isoformat()
+            if admission.discharge_date and hasattr(admission.discharge_date, "isoformat")
+            else str(admission.discharge_date)
+        )
+        discharge_type_out = admission.discharge_type
+
         await self.db.commit()
-        
+
         return {
-            "admission_id": str(admission.id),
-            "admission_number": admission.admission_number,
-            "patient_name": f"{admission.patient.user.first_name} {admission.patient.user.last_name}" if admission.patient and getattr(admission.patient, "user", None) else "Unknown",
-            "bed_code": admission.bed.bed_code if admission.bed else None,
-            "ward_name": admission.bed.ward.name if admission.bed and getattr(admission.bed, "ward", None) else None,
-            "discharge_date": admission.discharge_date.isoformat() if admission.discharge_date and hasattr(admission.discharge_date, "isoformat") else str(admission.discharge_date),
+            "admission_id": admission_id_str,
+            "admission_number": admission_number_out,
+            "patient_name": patient_name_out,
+            "bed_code": bed_code_out,
+            "ward_name": ward_name_out,
+            "discharge_date": discharge_date_out,
             "discharge_time": discharge_date.strftime("%H:%M") if discharge_date else None,
             "length_of_stay": length_of_stay,
-            "discharge_type": admission.discharge_type,
+            "discharge_type": discharge_type_out,
             "discharge_summary_id": discharge_summary_id,
-            "message": "Patient discharged successfully and bed released"
+            "message": "Patient discharged successfully and bed released",
         }
     
     async def get_admissions(
