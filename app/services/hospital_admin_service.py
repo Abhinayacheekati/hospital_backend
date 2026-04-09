@@ -2468,17 +2468,23 @@ class HospitalAdminService:
         if "head_nurse_id" in data:
             hid = data["head_nurse_id"]
             if hid:
-                head_nurse = await self._get_hospital_staff_user(
-                    hid if isinstance(hid, uuid.UUID) else uuid.UUID(str(hid))
-                )
+                hid_uuid = hid if isinstance(hid, uuid.UUID) else uuid.UUID(str(hid))
+                head_nurse = await self._get_hospital_staff_user(hid_uuid)
                 if not head_nurse:
                     raise HTTPException(
                         status_code=status.HTTP_404_NOT_FOUND,
                         detail={"code": "HEAD_NURSE_NOT_FOUND", "message": "Head nurse not found in this hospital"},
                     )
-                data["head_nurse_id"] = (
-                    hid if isinstance(hid, uuid.UUID) else uuid.UUID(str(hid))
-                )
+                nurse_roles = [r.name for r in head_nurse.roles]
+                if UserRole.NURSE not in nurse_roles:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={
+                            "code": "NOT_A_NURSE",
+                            "message": "Selected user is not a nurse in this hospital",
+                        },
+                    )
+                data["head_nurse_id"] = hid_uuid
             else:
                 data["head_nurse_id"] = None
 
@@ -4643,13 +4649,9 @@ class HospitalAdminService:
         return r.scalar_one_or_none()
     
     async def _get_hospital_staff_user(self, user_id: uuid.UUID) -> Optional[User]:
-        """Get staff user by ID within this hospital"""
+        """Load a user by ID that belongs to this hospital (caller validates role)."""
         query = select(User).options(selectinload(User.roles)).where(
-            and_(
-                User.id == user_id,
-                User.hospital_id == self.hospital_id,
-                User.roles.any(Role.name.in_([UserRole.DOCTOR, UserRole.LAB_TECH, UserRole.PHARMACIST]))
-            )
+            and_(User.id == user_id, User.hospital_id == self.hospital_id)
         )
         result = await self.db.execute(query)
         return result.scalar_one_or_none()
