@@ -81,6 +81,20 @@ class SuperAdminMeUpdate(BaseModel):
     security: Optional[SuperAdminSecurityPreferencesUpdate] = None
 
 
+class SuperAdminPasswordChange(BaseModel):
+    """Change password (matches profile UI: current, new, confirm)."""
+
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=8, max_length=128)
+    confirm_password: str = Field(..., min_length=8, max_length=128)
+
+    @model_validator(mode="after")
+    def _passwords_match(self):
+        if self.new_password != self.confirm_password:
+            raise ValueError("New password and confirmation must match")
+        return self
+
+
 # ============================================================================
 # SUPER ADMIN INPUT SCHEMAS (Create/Update/Filter)
 # ============================================================================

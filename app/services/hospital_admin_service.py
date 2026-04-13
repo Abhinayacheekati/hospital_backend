@@ -4295,7 +4295,7 @@ class HospitalAdminService:
             appointments_result = await self.db.execute(
                 select(func.count(Appointment.id)).where(
                     and_(
-                        Appointment.doctor_id == doctor.id,
+                        Appointment.doctor_id == doctor.user_id,
                         func.date(Appointment.appointment_date) >= thirty_days_ago_d,
                     )
                 )
@@ -4306,7 +4306,7 @@ class HospitalAdminService:
             completed_result = await self.db.execute(
                 select(func.count(Appointment.id)).where(
                     and_(
-                        Appointment.doctor_id == doctor.id,
+                        Appointment.doctor_id == doctor.user_id,
                         func.date(Appointment.appointment_date) >= thirty_days_ago_d,
                         Appointment.status == "COMPLETED",
                     )

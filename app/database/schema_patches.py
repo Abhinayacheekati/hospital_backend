@@ -121,3 +121,47 @@ def ensure_patient_profiles_opd_schema(sync_dsn: str) -> None:
             )
     finally:
         eng.dispose()
+
+
+def ensure_doctor_profiles_consultation_schema(sync_dsn: str) -> None:
+    """
+    Ensure doctor_profiles has consultation_type + availability_time.
+
+    Matches alembic `doctor_profile_consultation_fields_001` for deploys where migrations
+    lag behind the SQLAlchemy model (avoids UndefinedColumnError on staff endpoints).
+    """
+    dsn = (sync_dsn or "").strip()
+    if not dsn:
+        logger.warning("ensure_doctor_profiles_consultation_schema: empty DSN, skipping")
+        return
+
+    eng = create_engine(dsn)
+    try:
+        insp = inspect(eng)
+        if not insp.has_table("doctor_profiles"):
+            logger.debug("doctor_profiles missing; skipping consultation columns patch")
+            return
+
+        col_names = {c["name"] for c in insp.get_columns("doctor_profiles")}
+        alters: list[str] = []
+        if "consultation_type" not in col_names:
+            alters.append(
+                "ALTER TABLE doctor_profiles ADD COLUMN consultation_type VARCHAR(100)"
+            )
+        if "availability_time" not in col_names:
+            alters.append(
+                "ALTER TABLE doctor_profiles ADD COLUMN availability_time TEXT"
+            )
+
+        if not alters:
+            return
+
+        logger.info(
+            "Applying doctor_profiles consultation/availability column patch (%d statement(s))",
+            len(alters),
+        )
+        with eng.begin() as conn:
+            for stmt in alters:
+                conn.execute(text(stmt))
+    finally:
+        eng.dispose()
