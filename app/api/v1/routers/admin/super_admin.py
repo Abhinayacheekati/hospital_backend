@@ -5,6 +5,7 @@ Handles hospital management, subscription control, analytics, and compliance mon
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, and_
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 
@@ -16,11 +17,89 @@ from app.schemas.admin import (
     HospitalUpdate, AdminStatusUpdate, HospitalStatusUpdate,
     HospitalAdminCreate, SubscriptionPlanCreate, SubscriptionPlanUpdate,
     PlanAssignmentCreate, HospitalListOut, HospitalDetailsOut,
+    SuperAdminMeOut,
+    SuperAdminMeUpdate,
+    SuperAdminSecurityOut,
+    SuperAdminSessionOut,
 )
 from app.schemas.response import SuccessResponse
 from app.core.utils import parse_date_string
 
 router = APIRouter(prefix="/super-admin")
+
+_SUPER_ADMIN_SECURITY_META_KEY = "super_admin_security"
+
+
+def _user_metadata_as_dict(user: User) -> Dict[str, Any]:
+    raw = user.user_metadata
+    if raw is None or not isinstance(raw, dict):
+        return {}
+    return dict(raw)
+
+
+def _default_security_preferences() -> Dict[str, Any]:
+    return {
+        "enable_login_alerts": True,
+        "enable_suspicious_activity_alerts": True,
+        "inactivity_timeout_minutes": 30,
+        "enable_account_auto_lock": True,
+        "active_sessions": [],
+    }
+
+
+def _parse_session_items(raw_sessions: Any) -> List[SuperAdminSessionOut]:
+    if not isinstance(raw_sessions, list):
+        return []
+    out: List[SuperAdminSessionOut] = []
+    for item in raw_sessions:
+        if not isinstance(item, dict):
+            continue
+        try:
+            out.append(SuperAdminSessionOut.model_validate(item))
+        except Exception:
+            continue
+    return out
+
+
+def build_super_admin_me(user: User) -> SuperAdminMeOut:
+    """Assemble profile + security block for Super Admin settings UI."""
+    md = _user_metadata_as_dict(user)
+    stored = md.get(_SUPER_ADMIN_SECURITY_META_KEY)
+    if not isinstance(stored, dict):
+        stored = {}
+    base_prefs = _default_security_preferences()
+    merged_prefs = {**base_prefs, **{k: v for k, v in stored.items() if k in base_prefs}}
+
+    sessions = _parse_session_items(merged_prefs.get("active_sessions"))
+    totp_on = bool(getattr(user, "totp_enabled", False))
+
+    security = SuperAdminSecurityOut(
+        is_two_factor_enabled=totp_on,
+        enable_login_alerts=bool(merged_prefs.get("enable_login_alerts", True)),
+        enable_suspicious_activity_alerts=bool(
+            merged_prefs.get("enable_suspicious_activity_alerts", True)
+        ),
+        inactivity_timeout_minutes=int(merged_prefs.get("inactivity_timeout_minutes") or 30),
+        enable_account_auto_lock=bool(merged_prefs.get("enable_account_auto_lock", True)),
+        active_sessions=sessions,
+    )
+
+    fn = user.first_name or ""
+    ln = user.last_name or ""
+    full = f"{fn} {ln}".strip()
+
+    return SuperAdminMeOut(
+        first_name=fn,
+        last_name=ln,
+        full_name=full or fn or ln,
+        email=user.email or "",
+        phone_number=user.phone if user.phone is not None else "",
+        profile_picture_url=user.avatar_url,
+        middle_name=user.middle_name,
+        timezone=user.timezone,
+        language=user.language,
+        security=security,
+    )
 
 
 # ============================================================================
@@ -96,6 +175,89 @@ async def update_super_admin_profile(
         language=current_user.language,
     )
     return SuccessResponse(success=True, message="Profile updated", data=data)
+
+
+@router.get("/me", response_model=SuccessResponse[SuperAdminMeOut], tags=["Super Admin - Profile Settings"])
+async def get_super_admin_me(
+    current_user: User = Depends(require_super_admin()),
+):
+    """
+    Current Super Admin profile for the settings UI (Personal + Security summary).
+    Two-factor status reflects TOTP (`totp_enabled`); enroll via `/api/v1/auth/2fa/*`.
+    """
+    return SuccessResponse(
+        success=True,
+        message="OK",
+        data=build_super_admin_me(current_user),
+    )
+
+
+@router.patch("/me", response_model=SuccessResponse[SuperAdminMeOut], tags=["Super Admin - Profile Settings"])
+async def update_super_admin_me(
+    body: SuperAdminMeUpdate,
+    current_user: User = Depends(require_super_admin()),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Update Super Admin profile fields and security preferences stored in `user_metadata`.
+
+    Does **not** enable or disable TOTP — use `/api/v1/auth/2fa/setup`, `/verify`, and `/disable` for 2FA.
+    Password changes are not handled here (use a dedicated change-password flow when available).
+    """
+    payload = body.model_dump(exclude_unset=True)
+
+    if "email" in payload and payload["email"] is not None:
+        new_email = str(payload["email"]).strip()
+        if new_email != (current_user.email or ""):
+            dup = await db.execute(
+                select(User.id).where(
+                    and_(User.email == new_email, User.id != current_user.id)
+                )
+            )
+            if dup.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={"code": "EMAIL_IN_USE", "message": "This email is already registered"},
+                )
+            current_user.email = new_email
+
+    if "first_name" in payload:
+        current_user.first_name = payload["first_name"] or ""
+    if "last_name" in payload:
+        current_user.last_name = payload["last_name"] or ""
+    if "middle_name" in payload:
+        current_user.middle_name = payload["middle_name"]
+    if "phone_number" in payload:
+        current_user.phone = payload["phone_number"] if payload["phone_number"] is not None else ""
+    if "profile_picture_url" in payload:
+        current_user.avatar_url = payload["profile_picture_url"]
+    if "timezone" in payload:
+        current_user.timezone = payload["timezone"]
+    if "language" in payload:
+        current_user.language = payload["language"]
+
+    if body.security is not None:
+        sec_updates = body.security.model_dump(exclude_unset=True)
+        if sec_updates:
+            md = _user_metadata_as_dict(current_user)
+            existing = md.get(_SUPER_ADMIN_SECURITY_META_KEY)
+            if not isinstance(existing, dict):
+                existing = {}
+            merged = {**_default_security_preferences(), **existing}
+            for key, val in sec_updates.items():
+                if key in merged:
+                    merged[key] = val
+            md[_SUPER_ADMIN_SECURITY_META_KEY] = merged
+            current_user.user_metadata = md
+
+    await db.commit()
+    await db.refresh(current_user)
+
+    return SuccessResponse(
+        success=True,
+        message="Profile updated",
+        data=build_super_admin_me(current_user),
+    )
 
 
 # ============================================================================
