@@ -144,6 +144,20 @@ async def get_super_admin_service(db: AsyncSession = Depends(get_db_session)) ->
     return SuperAdminService(db)
 
 
+async def _bind_super_admin_user_to_db(db: AsyncSession, current_user: User) -> User:
+    """
+    Re-load the authenticated user in the same DB session used for writes.
+    Avoids cross-session refresh/commit errors for profile update endpoints.
+    """
+    db_user = await db.get(User, current_user.id)
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "USER_NOT_FOUND", "message": "Authenticated user not found"},
+        )
+    return db_user
+
+
 class SuperAdminProfileOut(BaseModel):
     email: str
     first_name: str
@@ -193,6 +207,7 @@ async def update_super_admin_profile(
     current_user: User = Depends(require_super_admin()),
     db: AsyncSession = Depends(get_db_session),
 ):
+    current_user = await _bind_super_admin_user_to_db(db, current_user)
     for k, v in body.model_dump(exclude_unset=True).items():
         setattr(current_user, k, v)
     await db.commit()
@@ -208,6 +223,16 @@ async def update_super_admin_profile(
         language=current_user.language,
     )
     return SuccessResponse(success=True, message="Profile updated", data=data)
+
+
+@router.post("/profile", response_model=SuccessResponse[SuperAdminProfileOut], tags=["Super Admin - Profile Settings"])
+async def update_super_admin_profile_post_compat(
+    body: SuperAdminProfileUpdate,
+    current_user: User = Depends(require_super_admin()),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Backward-compatible alias for clients still sending POST for profile updates."""
+    return await update_super_admin_profile(body=body, current_user=current_user, db=db)
 
 
 @router.get("/me", response_model=SuccessResponse[SuperAdminMeOut], tags=["Super Admin - Profile Settings"])
@@ -237,6 +262,7 @@ async def update_super_admin_me(
     Does **not** enable or disable TOTP — use `/api/v1/auth/2fa/setup`, `/verify`, and `/disable` for 2FA.
     Password changes are not handled here (use a dedicated change-password flow when available).
     """
+    current_user = await _bind_super_admin_user_to_db(db, current_user)
     payload = body.model_dump(exclude_unset=True)
 
     if "email" in payload and payload["email"] is not None:
@@ -332,6 +358,7 @@ async def upload_super_admin_avatar(
     Upload a profile picture for the Super Admin. Saves under `/uploads/superadmin_avatars/`
     and sets `profile_picture_url` on GET `/super-admin/me`.
     """
+    current_user = await _bind_super_admin_user_to_db(db, current_user)
     ct = (file.content_type or "").split(";")[0].strip().lower()
     if ct not in _SUPERADMIN_AVATAR_TYPES:
         raise HTTPException(
