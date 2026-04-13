@@ -352,7 +352,9 @@ _SUPERADMIN_AVATAR_TYPES = {
 
 @router.post("/me/avatar", response_model=SuccessResponse[SuperAdminMeOut], tags=["Super Admin - Profile Settings"])
 async def upload_super_admin_avatar(
-    file: UploadFile = File(..., description="Profile image: JPG, PNG, or GIF; max 5MB"),
+    file: Optional[UploadFile] = File(None, description="Profile image: JPG, PNG, or GIF; max 5MB"),
+    avatar: Optional[UploadFile] = File(None, description="Compatibility alias for file"),
+    image: Optional[UploadFile] = File(None, description="Compatibility alias for file"),
     current_user: User = Depends(require_super_admin()),
     db: AsyncSession = Depends(get_db_session),
 ):
@@ -361,7 +363,17 @@ async def upload_super_admin_avatar(
     and sets `profile_picture_url` on GET `/super-admin/me`.
     """
     current_user = await _bind_super_admin_user_to_db(db, current_user)
-    ct = (file.content_type or "").split(";")[0].strip().lower()
+    upload = file or avatar or image
+    if upload is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "MISSING_AVATAR_FILE",
+                "message": "Upload file is required (multipart field: file, avatar, or image)",
+            },
+        )
+
+    ct = (upload.content_type or "").split(";")[0].strip().lower()
     if ct not in _SUPERADMIN_AVATAR_TYPES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -388,7 +400,7 @@ async def upload_super_admin_avatar(
     total = 0
     async with aiofiles.open(dest, "wb") as out_f:
         while True:
-            chunk = await file.read(65536)
+            chunk = await upload.read(65536)
             if not chunk:
                 break
             total += len(chunk)
