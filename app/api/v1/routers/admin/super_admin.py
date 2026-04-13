@@ -2,15 +2,19 @@
 Super Admin API endpoints for platform-level administrative operations.
 Handles hospital management, subscription control, analytics, and compliance monitoring.
 """
+import os
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+import aiofiles
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
+from sqlalchemy.orm.attributes import flag_modified
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 
 from app.api.deps import get_db_session, require_super_admin
 from app.services.super_admin_service import SuperAdminService
+from app.services.auth_service import AuthService
 from app.models.user import User
 from app.core.enums import UserRole, UserStatus, HospitalStatus
 from app.schemas.admin import (
@@ -21,6 +25,7 @@ from app.schemas.admin import (
     SuperAdminMeUpdate,
     SuperAdminSecurityOut,
     SuperAdminSessionOut,
+    SuperAdminPasswordChange,
 )
 from app.schemas.response import SuccessResponse
 from app.core.utils import parse_date_string
@@ -61,6 +66,30 @@ def _parse_session_items(raw_sessions: Any) -> List[SuperAdminSessionOut]:
     return out
 
 
+def _safe_int_timeout_minutes(raw: Any, default: int = 30) -> int:
+    """Avoid 500s when user_metadata has a non-numeric inactivity_timeout_minutes."""
+    try:
+        v = int(float(raw))
+    except (TypeError, ValueError):
+        return default
+    return max(5, min(24 * 60, v))
+
+
+def _safe_bool_pref(raw: Any, default: bool = True) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    s = str(raw).strip().lower()
+    if s in ("true", "1", "yes", "on"):
+        return True
+    if s in ("false", "0", "no", "off"):
+        return False
+    return default
+
+
 def build_super_admin_me(user: User) -> SuperAdminMeOut:
     """Assemble profile + security block for Super Admin settings UI."""
     md = _user_metadata_as_dict(user)
@@ -75,12 +104,16 @@ def build_super_admin_me(user: User) -> SuperAdminMeOut:
 
     security = SuperAdminSecurityOut(
         is_two_factor_enabled=totp_on,
-        enable_login_alerts=bool(merged_prefs.get("enable_login_alerts", True)),
-        enable_suspicious_activity_alerts=bool(
-            merged_prefs.get("enable_suspicious_activity_alerts", True)
+        enable_login_alerts=_safe_bool_pref(merged_prefs.get("enable_login_alerts"), True),
+        enable_suspicious_activity_alerts=_safe_bool_pref(
+            merged_prefs.get("enable_suspicious_activity_alerts"), True
         ),
-        inactivity_timeout_minutes=int(merged_prefs.get("inactivity_timeout_minutes") or 30),
-        enable_account_auto_lock=bool(merged_prefs.get("enable_account_auto_lock", True)),
+        inactivity_timeout_minutes=_safe_int_timeout_minutes(
+            merged_prefs.get("inactivity_timeout_minutes"), 30
+        ),
+        enable_account_auto_lock=_safe_bool_pref(
+            merged_prefs.get("enable_account_auto_lock"), True
+        ),
         active_sessions=sessions,
     )
 
@@ -249,6 +282,7 @@ async def update_super_admin_me(
                     merged[key] = val
             md[_SUPER_ADMIN_SECURITY_META_KEY] = merged
             current_user.user_metadata = md
+            flag_modified(current_user, "user_metadata")
 
     await db.commit()
     await db.refresh(current_user)
@@ -256,6 +290,100 @@ async def update_super_admin_me(
     return SuccessResponse(
         success=True,
         message="Profile updated",
+        data=build_super_admin_me(current_user),
+    )
+
+
+@router.post("/me/change-password", tags=["Super Admin - Profile Settings"])
+async def super_admin_change_password(
+    body: SuperAdminPasswordChange,
+    current_user: User = Depends(require_super_admin()),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Change Super Admin password (current + new + confirm). Uses same rules as other roles."""
+    auth_service = AuthService(db)
+    await auth_service.change_password(
+        current_user.id,
+        body.current_password,
+        body.new_password,
+    )
+    return SuccessResponse(
+        success=True,
+        message="Password changed successfully",
+        data={"status": "success"},
+    )
+
+
+_SUPERADMIN_AVATAR_MAX_BYTES = 5 * 1024 * 1024
+_SUPERADMIN_AVATAR_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+}
+
+
+@router.post("/me/avatar", response_model=SuccessResponse[SuperAdminMeOut], tags=["Super Admin - Profile Settings"])
+async def upload_super_admin_avatar(
+    file: UploadFile = File(..., description="Profile image: JPG, PNG, or GIF; max 5MB"),
+    current_user: User = Depends(require_super_admin()),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Upload a profile picture for the Super Admin. Saves under `/uploads/superadmin_avatars/`
+    and sets `profile_picture_url` on GET `/super-admin/me`.
+    """
+    ct = (file.content_type or "").split(";")[0].strip().lower()
+    if ct not in _SUPERADMIN_AVATAR_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "INVALID_AVATAR_TYPE",
+                "message": "Allowed types: JPG, PNG, GIF",
+            },
+        )
+    ext = _SUPERADMIN_AVATAR_TYPES[ct]
+    upload_root = os.path.join("uploads", "superadmin_avatars")
+    os.makedirs(upload_root, exist_ok=True)
+    out_name = f"{current_user.id}{ext}"
+    dest = os.path.join(upload_root, out_name)
+    try:
+        for name in os.listdir(upload_root):
+            if name.startswith(str(current_user.id) + "."):
+                try:
+                    os.remove(os.path.join(upload_root, name))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+    total = 0
+    async with aiofiles.open(dest, "wb") as out_f:
+        while True:
+            chunk = await file.read(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _SUPERADMIN_AVATAR_MAX_BYTES:
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "AVATAR_TOO_LARGE",
+                        "message": "Maximum file size is 5MB",
+                    },
+                )
+            await out_f.write(chunk)
+
+    public_url = f"/uploads/superadmin_avatars/{out_name}"
+    current_user.avatar_url = public_url
+    await db.commit()
+    await db.refresh(current_user)
+    return SuccessResponse(
+        success=True,
+        message="Profile picture updated",
         data=build_super_admin_me(current_user),
     )
 

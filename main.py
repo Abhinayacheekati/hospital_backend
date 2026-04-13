@@ -4,6 +4,7 @@ Hospital Management SaaS Platform with zero-intervention database setup.
 """
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 import logging
 import time
@@ -515,6 +516,7 @@ async def setup_database_once() -> bool:
 
             # create_all + older images skip new columns; alembic subprocess may use wrong DSN without DATABASE_URL_SYNC
             from app.database.schema_patches import (
+                ensure_doctor_profiles_consultation_schema,
                 ensure_hospitals_tenant_database_name_column,
                 ensure_patient_profiles_opd_schema,
             )
@@ -524,6 +526,9 @@ async def setup_database_once() -> bool:
             )
             await asyncio.to_thread(
                 ensure_patient_profiles_opd_schema, settings.DATABASE_URL_SYNC
+            )
+            await asyncio.to_thread(
+                ensure_doctor_profiles_consultation_schema, settings.DATABASE_URL_SYNC
             )
 
             # Step 2.5: Optionally prune legacy tables (dev/local only)
@@ -885,6 +890,10 @@ async def verify_superadmin():
 
 # Include API routers
 app.include_router(api_router)
+
+# Uploaded assets (e.g. Super Admin avatar under uploads/superadmin_avatars)
+os.makedirs(os.path.join("uploads", "superadmin_avatars"), exist_ok=True)
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # Public demo request (DCM) — mounted after main API
 from app.api.demo_public import router as demo_public_router
