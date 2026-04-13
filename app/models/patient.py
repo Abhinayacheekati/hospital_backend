@@ -89,7 +89,7 @@ class Appointment(TenantBaseModel):
     
     # Scheduling
     appointment_date = Column(String(10), nullable=False)  # YYYY-MM-DD
-    appointment_time = Column(String(8), nullable=False)   # HH:MM:SS
+    appointment_time = Column(String(16), nullable=False)  # HH:MM:SS (normalized in services)
     duration_minutes = Column(Integer, default=30)
     
     # Appointment details

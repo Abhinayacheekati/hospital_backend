@@ -58,6 +58,28 @@ def _appointment_is_emergency(appointment: Any) -> bool:
         return True
     return (getattr(appointment, "appointment_type", None) or "").strip().upper() == "EMERGENCY"
 
+def _age_from_date_of_birth(dob: Any) -> Optional[int]:
+    """Compute age in years from DOB (date/datetime/ISO string). Returns None when unknown/unparseable."""
+    if not dob:
+        return None
+    d: Optional[date] = None
+    if isinstance(dob, datetime):
+        d = dob.date()
+    elif isinstance(dob, date):
+        d = dob
+    else:
+        s = str(dob).strip()
+        if len(s) >= 10:
+            try:
+                d = date.fromisoformat(s[:10])
+            except ValueError:
+                d = None
+    if not d:
+        return None
+    today = datetime.utcnow().date()
+    age = today.year - d.year - (1 if (today.month, today.day) < (d.month, d.day) else 0)
+    return age if age >= 0 else None
+
 
 def _shift_type_from_timing(shift_timing: Optional[str]) -> str:
     """Map free-text shift label to nurse/receptionist shift_type (DAY, NIGHT, ROTATING)."""
@@ -1803,7 +1825,7 @@ class HospitalAdminService:
                 "email": appointment.patient.user.email,
                 "phone": appointment.patient.user.phone,
                 "patient_id": appointment.patient.patient_id,
-                "age": appointment.patient.age,
+                "age": _age_from_date_of_birth(getattr(appointment.patient, "date_of_birth", None)),
                 "gender": appointment.patient.gender,
                 "blood_group": appointment.patient.blood_group
             }
@@ -2042,7 +2064,7 @@ class HospitalAdminService:
                 "name": f"{patient.user.first_name} {patient.user.last_name}",
                 "email": patient.user.email,
                 "phone": patient.user.phone,
-                "age": patient.age,
+                "age": _age_from_date_of_birth(getattr(patient, "date_of_birth", None)),
                 "gender": patient.gender,
                 "date_of_birth": patient.date_of_birth,
                 # Contact and administrative info

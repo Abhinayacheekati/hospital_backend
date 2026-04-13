@@ -6,6 +6,82 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, mo
 
 
 # ============================================================================
+# SUPER ADMIN — MY PROFILE (UI: Personal, Security tabs)
+# ============================================================================
+
+class SuperAdminSessionOut(BaseModel):
+    """Active login session row for the Security tab (populated when stored in user metadata)."""
+
+    id: str
+    device_name: Optional[str] = None
+    browser: Optional[str] = None
+    location: Optional[str] = None
+    ip_address: Optional[str] = None
+    is_current: bool = False
+    last_active_at: Optional[str] = Field(
+        None, description="ISO-8601 or human-readable label from client"
+    )
+
+
+class SuperAdminSecurityOut(BaseModel):
+    """Security preferences + 2FA state for Super Admin profile settings UI."""
+
+    is_two_factor_enabled: bool = Field(
+        ..., description=" Mirrors TOTP enrollment; use /api/v1/auth/2fa/* to enable or disable."
+    )
+    enable_login_alerts: bool = True
+    enable_suspicious_activity_alerts: bool = True
+    inactivity_timeout_minutes: int = Field(30, ge=5, le=24 * 60)
+    enable_account_auto_lock: bool = True
+    active_sessions: List[SuperAdminSessionOut] = Field(
+        default_factory=list,
+        description="Session list when provided via metadata; empty until device sessions are tracked.",
+    )
+
+
+class SuperAdminMeOut(BaseModel):
+    """Full Super Admin profile payload aligned with the dashboard settings screens."""
+
+    first_name: str
+    last_name: str
+    full_name: str
+    email: str
+    phone_number: str
+    profile_picture_url: Optional[str] = None
+    middle_name: Optional[str] = None
+    timezone: Optional[str] = None
+    language: Optional[str] = None
+    security: SuperAdminSecurityOut
+
+
+class SuperAdminSecurityPreferencesUpdate(BaseModel):
+    """Partial update for Security tab toggles (does not replace /auth/2fa for TOTP)."""
+
+    enable_login_alerts: Optional[bool] = None
+    enable_suspicious_activity_alerts: Optional[bool] = None
+    inactivity_timeout_minutes: Optional[int] = Field(None, ge=5, le=24 * 60)
+    enable_account_auto_lock: Optional[bool] = None
+
+
+class SuperAdminMeUpdate(BaseModel):
+    """Update Super Admin profile: personal fields and optional security preferences."""
+
+    first_name: Optional[str] = Field(None, max_length=100)
+    last_name: Optional[str] = Field(None, max_length=100)
+    email: Optional[EmailStr] = None
+    phone_number: Optional[str] = Field(
+        None,
+        max_length=20,
+        description="Phone shown in UI; empty string clears display (stored as empty).",
+    )
+    profile_picture_url: Optional[str] = Field(None, max_length=500)
+    middle_name: Optional[str] = Field(None, max_length=100)
+    timezone: Optional[str] = Field(None, max_length=50)
+    language: Optional[str] = Field(None, max_length=10)
+    security: Optional[SuperAdminSecurityPreferencesUpdate] = None
+
+
+# ============================================================================
 # SUPER ADMIN INPUT SCHEMAS (Create/Update/Filter)
 # ============================================================================
 

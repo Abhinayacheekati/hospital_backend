@@ -16,7 +16,7 @@ from app.models.patient import PatientProfile, Appointment, MedicalRecord, Admis
 from app.models.hospital import Department, StaffDepartmentAssignment
 from app.models.tenant import Hospital
 from app.core.enums import UserRole, AppointmentStatus, UserStatus
-from app.core.utils import generate_patient_ref, generate_appointment_ref
+from app.core.utils import generate_patient_ref, generate_appointment_ref, parse_time_string
 from app.core.security import SecurityManager
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,14 @@ def _normalize_opd_gender(g: Optional[str]) -> Optional[str]:
     if x in ("MALE", "FEMALE", "OTHER"):
         return x
     return "OTHER"
+
+
+def _appointment_time_to_db_hms(raw: Any) -> str:
+    """Store appointment time as HH:MM:SS (8 chars) — DB column may be VARCHAR(8)."""
+    if raw is None:
+        raise ValueError("appointment_time is required")
+    t = parse_time_string(str(raw))
+    return t.strftime("%H:%M:%S")
 
 
 def _normalize_opd_blood_group(bg: Optional[str]) -> Optional[str]:
@@ -781,9 +789,23 @@ class ClinicalService:
                 # Update department
                 department = await self.get_department_by_name(value, user_context["hospital_id"])
                 appointment.department_id = department.id
-            elif field in ["appointment_date", "appointment_time", "chief_complaint", "notes", "status"]:
+            elif field == "appointment_date" and value is not None:
+                s = str(value).strip()
+                appointment.appointment_date = s[:10] if len(s) >= 10 else s
+            elif field == "appointment_time" and value is not None:
+                try:
+                    appointment.appointment_time = _appointment_time_to_db_hms(value)
+                except ValueError as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={
+                            "code": "INVALID_APPOINTMENT_TIME",
+                            "message": str(e),
+                        },
+                    )
+            elif field in ["chief_complaint", "notes", "status"]:
                 setattr(appointment, field, value)
-        
+
         await self.db.commit()
         
         return {
