@@ -1190,6 +1190,358 @@ class HospitalAdminService:
             "created_at": user.created_at.isoformat(),
             "updated_at": user.updated_at.isoformat()
         }
+
+    async def _get_staff_user_for_role(self, staff_id: uuid.UUID, expected_role: str) -> User:
+        """Load a hospital staff user and verify expected role membership."""
+        from app.models.user import User
+
+        result = await self.db.execute(
+            select(User).options(selectinload(User.roles)).where(
+                and_(
+                    User.id == staff_id,
+                    User.hospital_id == self.hospital_id,
+                )
+            )
+        )
+        user = result.scalar_one_or_none()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "STAFF_NOT_FOUND", "message": "Staff user not found"},
+            )
+
+        user_roles = [role.name for role in user.roles]
+        if expected_role not in user_roles:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "ROLE_MISMATCH",
+                    "message": f"Staff user is not assigned role {expected_role}",
+                },
+            )
+        return user
+
+    async def _apply_common_staff_updates(self, user: User, update_data: Dict[str, Any]) -> List[str]:
+        """Apply fields shared by all staff roles."""
+        updated_fields: List[str] = []
+
+        if "email" in update_data:
+            email = str(update_data["email"]).strip().lower()
+            if email and email != user.email:
+                existing = await self.db.execute(
+                    select(User.id).where(
+                        and_(
+                            User.email == email,
+                            User.id != user.id,
+                        )
+                    )
+                )
+                if existing.scalar_one_or_none():
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail={"code": "EMAIL_EXISTS", "message": "Email already in use"},
+                    )
+                user.email = email
+                updated_fields.append("email")
+
+        if "phone" in update_data:
+            phone = str(update_data["phone"]).strip()
+            if phone and phone != user.phone:
+                existing = await self.db.execute(
+                    select(User.id).where(
+                        and_(
+                            User.phone == phone,
+                            User.id != user.id,
+                        )
+                    )
+                )
+                if existing.scalar_one_or_none():
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail={"code": "PHONE_EXISTS", "message": "Phone already in use"},
+                    )
+                user.phone = phone
+                updated_fields.append("phone")
+
+        for field in ("first_name", "last_name", "middle_name"):
+            if field in update_data:
+                value = update_data[field]
+                if value != getattr(user, field):
+                    setattr(user, field, value)
+                    updated_fields.append(field)
+
+        md = dict(user.user_metadata or {})
+        if "emergency_contact" in update_data:
+            md["emergency_contact"] = update_data["emergency_contact"]
+            updated_fields.append("emergency_contact")
+        if "shift_timing" in update_data:
+            md["shift_timing"] = update_data["shift_timing"]
+            updated_fields.append("shift_timing")
+        if "joining_date" in update_data:
+            md["joining_date"] = _parse_joining_date_iso(update_data.get("joining_date"))
+            updated_fields.append("joining_date")
+        if "address" in update_data:
+            md["address"] = update_data["address"]
+            updated_fields.append("address")
+
+        user.user_metadata = md
+        return updated_fields
+
+    async def update_doctor_staff(self, staff_id: uuid.UUID, update_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Update doctor staff profile (hospital admin portal)."""
+        user = await self._get_staff_user_for_role(staff_id, UserRole.DOCTOR)
+        updated_fields = await self._apply_common_staff_updates(user, update_data)
+
+        md = dict(user.user_metadata or {})
+        doctor_result = await self.db.execute(
+            select(DoctorProfile).where(
+                and_(
+                    DoctorProfile.user_id == user.id,
+                    DoctorProfile.hospital_id == self.hospital_id,
+                )
+            )
+        )
+        doctor_profile = doctor_result.scalar_one_or_none()
+
+        if "department_name" in update_data:
+            department = await self._get_department_by_name(update_data["department_name"])
+            if not department:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "DEPARTMENT_NOT_FOUND", "message": "Department not found in this hospital"},
+                )
+            md["department_id"] = str(department.id)
+            md["department_name"] = department.name
+            if doctor_profile:
+                doctor_profile.department_id = department.id
+            updated_fields.append("department_name")
+
+        mapping = {
+            "doctor_specialization": "doctor_specialization",
+            "doctor_experience_years": "doctor_experience_years",
+            "consultation_fee": "consultation_fee",
+            "consultation_type": "consultation_type",
+            "availability_time": "availability_time",
+        }
+        for req_key, md_key in mapping.items():
+            if req_key in update_data:
+                md[md_key] = update_data[req_key]
+                updated_fields.append(req_key)
+
+        if doctor_profile:
+            if "designation" in update_data:
+                doctor_profile.designation = update_data["designation"]
+                updated_fields.append("designation")
+            if "doctor_specialization" in update_data:
+                doctor_profile.specialization = update_data["doctor_specialization"]
+            if "doctor_experience_years" in update_data:
+                doctor_profile.experience_years = int(update_data["doctor_experience_years"])
+            if "consultation_fee" in update_data:
+                doctor_profile.consultation_fee = Decimal(str(update_data["consultation_fee"]))
+            if "consultation_type" in update_data:
+                doctor_profile.consultation_type = update_data["consultation_type"]
+            if "availability_time" in update_data:
+                doctor_profile.availability_time = update_data["availability_time"]
+            doctor_profile.updated_at = datetime.utcnow()
+
+        user.user_metadata = md
+        user.updated_at = datetime.utcnow()
+        await self.db.commit()
+        return {
+            "user_id": str(user.id),
+            "role": UserRole.DOCTOR,
+            "updated_fields": sorted(set(updated_fields)),
+            "message": "Doctor staff updated successfully",
+        }
+
+    async def update_nurse_staff(self, staff_id: uuid.UUID, update_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Update nurse staff profile (hospital admin portal)."""
+        from app.models.nurse import NurseProfile
+
+        user = await self._get_staff_user_for_role(staff_id, UserRole.NURSE)
+        updated_fields = await self._apply_common_staff_updates(user, update_data)
+
+        md = dict(user.user_metadata or {})
+        profile_result = await self.db.execute(
+            select(NurseProfile).where(
+                and_(
+                    NurseProfile.user_id == user.id,
+                    NurseProfile.hospital_id == self.hospital_id,
+                )
+            )
+        )
+        nurse_profile = profile_result.scalar_one_or_none()
+
+        if "department_name" in update_data:
+            department = await self._get_department_by_name(update_data["department_name"])
+            if not department:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "DEPARTMENT_NOT_FOUND", "message": "Department not found in this hospital"},
+                )
+            md["department_id"] = str(department.id)
+            md["department_name"] = department.name
+            if nurse_profile:
+                nurse_profile.department_id = department.id
+            updated_fields.append("department_name")
+
+        if "nurse_specialization" in update_data:
+            md["nurse_specialization"] = update_data["nurse_specialization"]
+            updated_fields.append("nurse_specialization")
+        if "nurse_experience_years" in update_data:
+            md["nurse_experience_years"] = update_data["nurse_experience_years"]
+            updated_fields.append("nurse_experience_years")
+
+        if nurse_profile:
+            if "nurse_designation" in update_data:
+                nurse_profile.designation = update_data["nurse_designation"]
+                updated_fields.append("nurse_designation")
+            if "nurse_specialization" in update_data:
+                nurse_profile.specialization = update_data["nurse_specialization"]
+            if "nurse_experience_years" in update_data:
+                nurse_profile.experience_years = int(update_data["nurse_experience_years"])
+            if "shift_timing" in update_data:
+                nurse_profile.shift_type = _shift_type_from_timing(update_data["shift_timing"])
+            nurse_profile.updated_at = datetime.utcnow()
+
+        user.user_metadata = md
+        user.updated_at = datetime.utcnow()
+        await self.db.commit()
+        return {
+            "user_id": str(user.id),
+            "role": UserRole.NURSE,
+            "updated_fields": sorted(set(updated_fields)),
+            "message": "Nurse staff updated successfully",
+        }
+
+    async def update_receptionist_staff(self, staff_id: uuid.UUID, update_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Update receptionist staff profile (hospital admin portal)."""
+        from app.models.receptionist import ReceptionistProfile
+
+        user = await self._get_staff_user_for_role(staff_id, UserRole.RECEPTIONIST)
+        updated_fields = await self._apply_common_staff_updates(user, update_data)
+
+        md = dict(user.user_metadata or {})
+        profile_result = await self.db.execute(
+            select(ReceptionistProfile).where(
+                and_(
+                    ReceptionistProfile.user_id == user.id,
+                    ReceptionistProfile.hospital_id == self.hospital_id,
+                )
+            )
+        )
+        receptionist_profile = profile_result.scalar_one_or_none()
+
+        if "department_name" in update_data:
+            department = await self._get_department_by_name(update_data["department_name"])
+            if not department:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "DEPARTMENT_NOT_FOUND", "message": "Department not found in this hospital"},
+                )
+            md["department_id"] = str(department.id)
+            md["department_name"] = department.name
+            if receptionist_profile:
+                receptionist_profile.department_id = department.id
+            updated_fields.append("department_name")
+
+        recv_fields = (
+            "receptionist_work_area",
+            "receptionist_experience_years",
+            "receptionist_designation",
+            "gender",
+            "blood_group",
+        )
+        for key in recv_fields:
+            if key in update_data:
+                md[key] = update_data[key]
+                updated_fields.append(key)
+        if "receptionist_profile_photo_url" in update_data:
+            user.avatar_url = update_data["receptionist_profile_photo_url"]
+            updated_fields.append("receptionist_profile_photo_url")
+
+        if receptionist_profile:
+            if "receptionist_designation" in update_data:
+                receptionist_profile.designation = update_data["receptionist_designation"]
+            if "receptionist_work_area" in update_data:
+                receptionist_profile.work_area = update_data["receptionist_work_area"]
+            if "receptionist_experience_years" in update_data:
+                receptionist_profile.experience_years = int(update_data["receptionist_experience_years"])
+            if "shift_timing" in update_data:
+                receptionist_profile.shift_type = _shift_type_from_timing(update_data["shift_timing"])
+            receptionist_profile.updated_at = datetime.utcnow()
+
+        user.user_metadata = md
+        user.updated_at = datetime.utcnow()
+        await self.db.commit()
+        return {
+            "user_id": str(user.id),
+            "role": UserRole.RECEPTIONIST,
+            "updated_fields": sorted(set(updated_fields)),
+            "message": "Receptionist staff updated successfully",
+        }
+
+    async def update_lab_tech_staff(self, staff_id: uuid.UUID, update_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Update lab tech staff profile (hospital admin portal)."""
+        user = await self._get_staff_user_for_role(staff_id, UserRole.LAB_TECH)
+        updated_fields = await self._apply_common_staff_updates(user, update_data)
+
+        md = dict(user.user_metadata or {})
+        for key in ("lab_specialization", "lab_designation", "lab_experience_years"):
+            if key in update_data:
+                md[key] = update_data[key]
+                updated_fields.append(key)
+        if "department_name" in update_data:
+            department = await self._get_department_by_name(update_data["department_name"])
+            if not department:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "DEPARTMENT_NOT_FOUND", "message": "Department not found in this hospital"},
+                )
+            md["department_id"] = str(department.id)
+            md["department_name"] = department.name
+            updated_fields.append("department_name")
+
+        user.user_metadata = md
+        user.updated_at = datetime.utcnow()
+        await self.db.commit()
+        return {
+            "user_id": str(user.id),
+            "role": UserRole.LAB_TECH,
+            "updated_fields": sorted(set(updated_fields)),
+            "message": "Lab tech staff updated successfully",
+        }
+
+    async def update_pharmacist_staff(self, staff_id: uuid.UUID, update_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Update pharmacist staff profile (hospital admin portal)."""
+        user = await self._get_staff_user_for_role(staff_id, UserRole.PHARMACIST)
+        updated_fields = await self._apply_common_staff_updates(user, update_data)
+
+        md = dict(user.user_metadata or {})
+        for key in ("pharmacist_specialization", "pharmacist_designation", "pharmacist_experience_years"):
+            if key in update_data:
+                md[key] = update_data[key]
+                updated_fields.append(key)
+        if "department_name" in update_data:
+            department = await self._get_department_by_name(update_data["department_name"])
+            if not department:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "DEPARTMENT_NOT_FOUND", "message": "Department not found in this hospital"},
+                )
+            md["department_id"] = str(department.id)
+            md["department_name"] = department.name
+            updated_fields.append("department_name")
+
+        user.user_metadata = md
+        user.updated_at = datetime.utcnow()
+        await self.db.commit()
+        return {
+            "user_id": str(user.id),
+            "role": UserRole.PHARMACIST,
+            "updated_fields": sorted(set(updated_fields)),
+            "message": "Pharmacist staff updated successfully",
+        }
     
     async def update_staff_status(self, staff_id: uuid.UUID, is_active: bool) -> Dict[str, Any]:
         """Activate or deactivate staff user"""

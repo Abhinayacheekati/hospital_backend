@@ -366,6 +366,100 @@ class StaffStatusUpdate(BaseModel):
     is_active: bool = Field(..., description="Activate (true) or deactivate (false) staff user")
 
 
+class StaffUpdateResponse(BaseModel):
+    """Response after updating a staff profile from hospital admin portal."""
+    user_id: str
+    role: str
+    updated_fields: List[str] = Field(default_factory=list)
+    message: str
+
+
+class DoctorStaffUpdate(BaseModel):
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = Field(None, pattern=r'^\+?[\d\s\-\(\)]{10,20}$')
+    first_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    last_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    middle_name: Optional[str] = Field(None, max_length=100)
+    emergency_contact: Optional[str] = Field(None, pattern=r'^\+?[\d\s\-\(\)]{10,20}$')
+    shift_timing: Optional[str] = Field(None, max_length=200)
+    joining_date: Optional[str] = Field(None, description="Joining date: DD-MM-YYYY or YYYY-MM-DD")
+    address: Optional[str] = Field(None, max_length=2000)
+    department_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    doctor_specialization: Optional[str] = Field(None, max_length=255)
+    doctor_experience_years: Optional[int] = Field(None, ge=0, le=70)
+    consultation_fee: Optional[float] = Field(None, ge=0)
+    consultation_type: Optional[str] = Field(None, max_length=100)
+    availability_time: Optional[str] = Field(None, max_length=2000)
+    designation: Optional[str] = Field(None, max_length=100)
+
+
+class NurseStaffUpdate(BaseModel):
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = Field(None, pattern=r'^\+?[\d\s\-\(\)]{10,20}$')
+    first_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    last_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    middle_name: Optional[str] = Field(None, max_length=100)
+    emergency_contact: Optional[str] = Field(None, pattern=r'^\+?[\d\s\-\(\)]{10,20}$')
+    shift_timing: Optional[str] = Field(None, max_length=200)
+    joining_date: Optional[str] = Field(None, description="Joining date: DD-MM-YYYY or YYYY-MM-DD")
+    address: Optional[str] = Field(None, max_length=2000)
+    department_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    nurse_designation: Optional[str] = Field(None, max_length=100)
+    nurse_specialization: Optional[str] = Field(None, max_length=255)
+    nurse_experience_years: Optional[int] = Field(None, ge=0, le=70)
+
+
+class ReceptionistStaffUpdate(BaseModel):
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = Field(None, pattern=r'^\+?[\d\s\-\(\)]{10,20}$')
+    first_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    last_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    middle_name: Optional[str] = Field(None, max_length=100)
+    emergency_contact: Optional[str] = Field(None, pattern=r'^\+?[\d\s\-\(\)]{10,20}$')
+    shift_timing: Optional[str] = Field(None, max_length=200)
+    joining_date: Optional[str] = Field(None, description="Joining date: DD-MM-YYYY or YYYY-MM-DD")
+    address: Optional[str] = Field(None, max_length=2000)
+    department_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    receptionist_work_area: Optional[str] = Field(None, max_length=100)
+    receptionist_experience_years: Optional[int] = Field(None, ge=0, le=60)
+    receptionist_designation: Optional[str] = Field(None, max_length=100)
+    gender: Optional[str] = Field(None, max_length=30)
+    blood_group: Optional[str] = Field(None, max_length=20)
+    receptionist_profile_photo_url: Optional[str] = Field(None, max_length=500)
+
+
+class LabTechStaffUpdate(BaseModel):
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = Field(None, pattern=r'^\+?[\d\s\-\(\)]{10,20}$')
+    first_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    last_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    middle_name: Optional[str] = Field(None, max_length=100)
+    emergency_contact: Optional[str] = Field(None, pattern=r'^\+?[\d\s\-\(\)]{10,20}$')
+    shift_timing: Optional[str] = Field(None, max_length=200)
+    joining_date: Optional[str] = Field(None, description="Joining date: DD-MM-YYYY or YYYY-MM-DD")
+    address: Optional[str] = Field(None, max_length=2000)
+    department_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    lab_specialization: Optional[str] = Field(None, max_length=255)
+    lab_designation: Optional[str] = Field(None, max_length=100)
+    lab_experience_years: Optional[int] = Field(None, ge=0, le=70)
+
+
+class PharmacistStaffUpdate(BaseModel):
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = Field(None, pattern=r'^\+?[\d\s\-\(\)]{10,20}$')
+    first_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    last_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    middle_name: Optional[str] = Field(None, max_length=100)
+    emergency_contact: Optional[str] = Field(None, pattern=r'^\+?[\d\s\-\(\)]{10,20}$')
+    shift_timing: Optional[str] = Field(None, max_length=200)
+    joining_date: Optional[str] = Field(None, description="Joining date: DD-MM-YYYY or YYYY-MM-DD")
+    address: Optional[str] = Field(None, max_length=2000)
+    department_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    pharmacist_specialization: Optional[str] = Field(None, max_length=255)
+    pharmacist_designation: Optional[str] = Field(None, max_length=100)
+    pharmacist_experience_years: Optional[int] = Field(None, ge=0, le=70)
+
+
 class AppointmentStatusUpdate(BaseModel):
     """Appointment status update request"""
     status: str = Field(..., description="New appointment status")
