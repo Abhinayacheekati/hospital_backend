@@ -21,7 +21,9 @@ from app.models.user import User
 from app.core.enums import UserRole
 from app.schemas.admin import (
     DepartmentCreate, DepartmentUpdate, DepartmentStatusUpdate,
-    StaffCreate, StaffStatusUpdate, AppointmentStatusUpdate,
+    StaffCreate, StaffStatusUpdate, StaffUpdateResponse,
+    DoctorStaffUpdate, NurseStaffUpdate, ReceptionistStaffUpdate, LabTechStaffUpdate, PharmacistStaffUpdate,
+    AppointmentStatusUpdate,
     PatientStatusUpdate, WardCreate, WardUpdate, WardStatusUpdate,
     BedCreate, BedStatusUpdate, AdmissionCreate, BedAssignmentCreate,
     DischargeCreate, DepartmentAssignmentCreate, DepartmentUnassignmentCreate,
@@ -285,6 +287,101 @@ async def get_staff_details(
     
     result = await service.get_staff_details(staff_uuid)
     return result
+
+
+@router.patch("/staff/doctors/{staff_id}", response_model=StaffUpdateResponse, tags=["Hospital Admin - Staff Management"])
+async def update_doctor_staff_profile(
+    staff_id: str,
+    update_data: DoctorStaffUpdate,
+    current_user: User = Depends(require_hospital_admin()),
+    service: HospitalAdminService = Depends(get_hospital_admin_service),
+):
+    """Update doctor staff profile from hospital admin portal."""
+    try:
+        staff_uuid = uuid.UUID(staff_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_STAFF_ID", "message": "Invalid staff ID format"},
+        )
+    result = await service.update_doctor_staff(staff_uuid, update_data.model_dump(exclude_none=True))
+    return StaffUpdateResponse(**result)
+
+
+@router.patch("/staff/nurses/{staff_id}", response_model=StaffUpdateResponse, tags=["Hospital Admin - Staff Management"])
+async def update_nurse_staff_profile(
+    staff_id: str,
+    update_data: NurseStaffUpdate,
+    current_user: User = Depends(require_hospital_admin()),
+    service: HospitalAdminService = Depends(get_hospital_admin_service),
+):
+    """Update nurse staff profile from hospital admin portal."""
+    try:
+        staff_uuid = uuid.UUID(staff_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_STAFF_ID", "message": "Invalid staff ID format"},
+        )
+    result = await service.update_nurse_staff(staff_uuid, update_data.model_dump(exclude_none=True))
+    return StaffUpdateResponse(**result)
+
+
+@router.patch("/staff/receptionists/{staff_id}", response_model=StaffUpdateResponse, tags=["Hospital Admin - Staff Management"])
+async def update_receptionist_staff_profile(
+    staff_id: str,
+    update_data: ReceptionistStaffUpdate,
+    current_user: User = Depends(require_hospital_admin()),
+    service: HospitalAdminService = Depends(get_hospital_admin_service),
+):
+    """Update receptionist staff profile from hospital admin portal."""
+    try:
+        staff_uuid = uuid.UUID(staff_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_STAFF_ID", "message": "Invalid staff ID format"},
+        )
+    result = await service.update_receptionist_staff(staff_uuid, update_data.model_dump(exclude_none=True))
+    return StaffUpdateResponse(**result)
+
+
+@router.patch("/staff/lab-techs/{staff_id}", response_model=StaffUpdateResponse, tags=["Hospital Admin - Staff Management"])
+async def update_lab_tech_staff_profile(
+    staff_id: str,
+    update_data: LabTechStaffUpdate,
+    current_user: User = Depends(require_hospital_admin()),
+    service: HospitalAdminService = Depends(get_hospital_admin_service),
+):
+    """Update lab tech staff profile from hospital admin portal."""
+    try:
+        staff_uuid = uuid.UUID(staff_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_STAFF_ID", "message": "Invalid staff ID format"},
+        )
+    result = await service.update_lab_tech_staff(staff_uuid, update_data.model_dump(exclude_none=True))
+    return StaffUpdateResponse(**result)
+
+
+@router.patch("/staff/pharmacists/{staff_id}", response_model=StaffUpdateResponse, tags=["Hospital Admin - Staff Management"])
+async def update_pharmacist_staff_profile(
+    staff_id: str,
+    update_data: PharmacistStaffUpdate,
+    current_user: User = Depends(require_hospital_admin()),
+    service: HospitalAdminService = Depends(get_hospital_admin_service),
+):
+    """Update pharmacist staff profile from hospital admin portal."""
+    try:
+        staff_uuid = uuid.UUID(staff_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_STAFF_ID", "message": "Invalid staff ID format"},
+        )
+    result = await service.update_pharmacist_staff(staff_uuid, update_data.model_dump(exclude_none=True))
+    return StaffUpdateResponse(**result)
 
 
 @router.patch("/staff/{staff_id}/status", tags=["Hospital Admin - Staff Management"])

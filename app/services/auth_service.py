@@ -905,12 +905,15 @@ class AuthService:
     
     async def _generate_auth_response(self, user) -> Dict[str, Any]:
         """Generate authentication response with tokens"""
-        # Create JWT payload
-        user_roles = [role.name for role in user.roles]
-        user_permissions = []
-        for role in user.roles:
-            for permission in role.permissions:
-                user_permissions.append(permission.name)
+        # Create JWT payload (defensive: tolerate missing roles/permissions on inconsistent seed data).
+        roles = list(getattr(user, "roles", None) or [])
+        user_roles = [str(getattr(role, "name", "")).strip() for role in roles if getattr(role, "name", None)]
+        user_permissions: List[str] = []
+        for role in roles:
+            for permission in (getattr(role, "permissions", None) or []):
+                pname = getattr(permission, "name", None)
+                if pname:
+                    user_permissions.append(str(pname))
         
         payload = {
             "sub": str(user.id),  # Use "sub" as per JWT standard
@@ -1342,7 +1345,10 @@ class AuthService:
     
     def _is_patient(self, user: User) -> bool:
         """Check if user has patient role"""
-        return any(role.name == UserRole.PATIENT for role in user.roles)
+        return any(
+            str(getattr(role, "name", "")).strip() == UserRole.PATIENT.value
+            for role in (getattr(user, "roles", None) or [])
+        )
     
     async def _log_failed_login(self, user_id: uuid.UUID, reason: str):
         """Log failed login attempt"""
