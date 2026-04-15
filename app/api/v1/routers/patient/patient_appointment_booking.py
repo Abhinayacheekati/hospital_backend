@@ -270,7 +270,11 @@ async def get_doctor_available_slots(
         "hospital_name": hospital.name,
         "date": date,
         "available_slots": [
-            {"time": s["time"], "is_available": s["is_available"], "duration_minutes": s.get("duration_minutes", 30)}
+            {
+                "time": s["time"],
+                "is_available": s["is_available"],
+                "duration_minutes": s["duration_minutes"],
+            }
             for s in slots
         ],
     }
@@ -435,7 +439,7 @@ async def book_appointment(
         hospital_id=hospital.id,  # Use the specified hospital
         appointment_date=data['appointment_date'],
         appointment_time=time_hhmmss,
-        duration_minutes=int(match.get("duration_minutes") or 30),
+        duration_minutes=int(match["duration_minutes"]),
         status=AppointmentStatus.REQUESTED,
         chief_complaint=data['chief_complaint'],
         consultation_fee=500.0,  # Default consultation fee

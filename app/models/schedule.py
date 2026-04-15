@@ -25,7 +25,8 @@ class DoctorSchedule(TenantBaseModel):
     
     # Schedule metadata
     is_active = Column(Boolean, default=True)
-    slot_duration_minutes = Column(Integer, default=30)  # Default appointment duration
+    # Length of each bookable slot (minutes); set when doctor creates/updates schedule — drives patient slots
+    slot_duration_minutes = Column(Integer, nullable=True)
     max_patients_per_slot = Column(Integer, default=1)
     
     # Break times

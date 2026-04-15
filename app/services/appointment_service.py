@@ -19,6 +19,22 @@ from app.core.enums import AppointmentStatus, UserRole
 from app.core.utils import generate_appointment_ref, generate_patient_ref
 
 
+def _normalize_appointment_time_parts(appointment_time: str) -> tuple[str, str]:
+    """Return (HH:MM for slot match, HH:MM:SS for DB)."""
+    raw = (appointment_time or "").strip()
+    parts = [p for p in raw.split(":") if p != ""]
+    if len(parts) >= 3:
+        h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
+    elif len(parts) >= 2:
+        h, m, s = int(parts[0]), int(parts[1]), 0
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid appointment_time; use HH:MM or HH:MM:SS",
+        )
+    return f"{h:02d}:{m:02d}", f"{h:02d}:{m:02d}:{s:02d}"
+
+
 class AppointmentService:
     """Service for managing appointments with hospital isolation"""
     
@@ -101,10 +117,15 @@ class AppointmentService:
         if not doctor_schedule:
             return []
 
+        # Slot length must be set on the doctor's schedule — no invented defaults
+        slot_mins = doctor_schedule.slot_duration_minutes
+        if slot_mins is None or slot_mins < 15:
+            return []
+
         slots: List[Dict[str, Any]] = []
         current_time = datetime.combine(target_date.date(), doctor_schedule.start_time)
         end_boundary = datetime.combine(target_date.date(), doctor_schedule.end_time)
-        slot_duration = timedelta(minutes=doctor_schedule.slot_duration_minutes or 30)
+        slot_duration = timedelta(minutes=slot_mins)
         max_patients = max(1, doctor_schedule.max_patients_per_slot or 1)
 
         while current_time + slot_duration <= end_boundary:
@@ -140,7 +161,7 @@ class AppointmentService:
                     "time": current_time.strftime("%H:%M"),
                     "time_24h": time_hms,
                     "is_available": is_available,
-                    "duration_minutes": doctor_schedule.slot_duration_minutes,
+                    "duration_minutes": int(slot_mins),
                 }
             )
             current_time += slot_duration
@@ -228,22 +249,44 @@ class AppointmentService:
                 detail="Doctor not found"
             )
         
+        time_hhmm, time_hhmmss = _normalize_appointment_time_parts(appointment_time)
+
         # Validate appointment date (not in the past)
-        appointment_datetime = datetime.fromisoformat(f"{appointment_date}T{appointment_time}")
+        appointment_datetime = datetime.fromisoformat(f"{appointment_date}T{time_hhmmss}")
         if appointment_datetime <= datetime.now():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Cannot book appointments in the past"
             )
-        
-        # Check if slot is available
+
+        # Book only times generated from this doctor's schedule (duration from schedule, not a default)
+        day_slots = await self.get_available_time_slots_for_doctor_user(doctor.user_id, appointment_date)
+        if not day_slots:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This doctor has no availability on that day. Choose a date with a published schedule.",
+            )
+        slot_match = next((s for s in day_slots if s["time"] == time_hhmm), None)
+        if not slot_match:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Selected time is not in this doctor's schedule. Use available slots from the booking API.",
+            )
+        if not slot_match.get("is_available"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This time slot is already booked",
+            )
+        duration_minutes = int(slot_match["duration_minutes"])
+
+        # Check if slot is available (race safety; doctor_id is User.id)
         existing_appointment = await self.db.execute(
             select(Appointment)
             .where(
                 and_(
-                    Appointment.doctor_id == doctor_id,
+                    Appointment.doctor_id == doctor.user_id,
                     Appointment.appointment_date == appointment_date,
-                    Appointment.appointment_time == appointment_time,
+                    Appointment.appointment_time == time_hhmmss,
                     Appointment.status.in_([AppointmentStatus.REQUESTED, AppointmentStatus.CONFIRMED])
                 )
             )
@@ -275,8 +318,8 @@ class AppointmentService:
             department_id=department_id,
             hospital_id=hospital_id,
             appointment_date=appointment_date,
-            appointment_time=appointment_time,
-            duration_minutes=30,  # Default duration
+            appointment_time=time_hhmmss,
+            duration_minutes=duration_minutes,
             status=AppointmentStatus.REQUESTED,
             chief_complaint=chief_complaint,
             consultation_fee=doctor.consultation_fee,

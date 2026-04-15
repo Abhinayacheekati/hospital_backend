@@ -11,7 +11,7 @@ from app.core.database_types import UUID_TYPE, JSON_TYPE
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
-from app.models.base import BaseModel
+from app.models.base import BaseModel, TenantBaseModel
 from app.core.enums import (
     SampleType, LabOrderSource, LabOrderPriority, LabOrderStatus,
     LabTestStatus, LabOrderItemStatus, SampleStatus, ContainerType, RejectionReason,
@@ -19,23 +19,18 @@ from app.core.enums import (
 )
 
 
-class LabTestCategory(BaseModel):
+class LabTestCategory(TenantBaseModel):
     """
     Lab Test Category / Department - Groups tests by department (e.g. Hematology, Biochemistry).
+    Inherits id, hospital_id, created_at, updated_at, is_active from TenantBaseModel (single definition;
+    duplicate audit columns on BaseModel subclasses caused naive/aware datetime issues on insert).
     """
     __tablename__ = "lab_test_categories"
-
-    id = Column(UUID_TYPE, primary_key=True, default=uuid.uuid4)
-    hospital_id = Column(UUID_TYPE, ForeignKey("hospitals.id"), nullable=False, index=True)
 
     category_code = Column(String(50), nullable=False, index=True)
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     display_order = Column(Integer, nullable=False, default=0)
-
-    is_active = Column(Boolean, nullable=False, default=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     hospital = relationship("Hospital", back_populates="lab_test_categories")
     tests = relationship("LabTest", back_populates="category")
@@ -49,14 +44,13 @@ class LabTestCategory(BaseModel):
         return f"<LabTestCategory(code='{self.category_code}', name='{self.name}')>"
 
 
-class LabTest(BaseModel):
+class LabTest(TenantBaseModel):
     """
-    Lab Test Catalogue - Master data for available lab tests
+    Lab Test Catalogue - Master data for available lab tests.
+    Inherits id, hospital_id, created_at, updated_at, is_active from TenantBaseModel.
     """
     __tablename__ = "lab_tests"
 
-    id = Column(UUID_TYPE, primary_key=True, default=uuid.uuid4)
-    hospital_id = Column(UUID_TYPE, ForeignKey("hospitals.id"), nullable=False, index=True)
     category_id = Column(UUID_TYPE, ForeignKey("lab_test_categories.id"), nullable=True, index=True)
 
     # Test identification
@@ -77,11 +71,6 @@ class LabTest(BaseModel):
 
     # Status and metadata
     status = Column(String(20), nullable=False, default=LabTestStatus.ACTIVE)
-    is_active = Column(Boolean, nullable=False, default=True)
-
-    # Timestamps
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     # Relationships
     hospital = relationship("Hospital", back_populates="lab_tests")

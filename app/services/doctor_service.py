@@ -162,7 +162,7 @@ class DoctorService:
             select(Appointment)
             .where(
                 and_(
-                    Appointment.doctor_id == doctor.id,
+                    Appointment.doctor_id == doctor.user_id,
                     Appointment.appointment_date >= start_date.isoformat(),
                     Appointment.appointment_date <= end_date.isoformat()
                 )
@@ -188,8 +188,8 @@ class DoctorService:
             # Get appointments for this day
             day_appointments = [a for a in appointments if a.appointment_date == current_date.isoformat()]
             
-            if day_schedule:
-                # Calculate available slots
+            if day_schedule and day_schedule.slot_duration_minutes and day_schedule.slot_duration_minutes >= 15:
+                # Calculate available slots (slot length must be set on the schedule row)
                 start_time = datetime.strptime(day_schedule.start_time.strftime("%H:%M"), "%H:%M")
                 end_time = datetime.strptime(day_schedule.end_time.strftime("%H:%M"), "%H:%M")
                 slot_duration = timedelta(minutes=day_schedule.slot_duration_minutes)
@@ -227,6 +227,28 @@ class DoctorService:
                             "chief_complaint": apt.chief_complaint
                         } for apt in day_appointments
                     ]
+                })
+            elif day_schedule:
+                daily_schedules.append({
+                    "date": current_date.isoformat(),
+                    "day_name": day_name,
+                    "has_schedule": True,
+                    "start_time": day_schedule.start_time.strftime("%H:%M"),
+                    "end_time": day_schedule.end_time.strftime("%H:%M"),
+                    "slot_duration_minutes": day_schedule.slot_duration_minutes,
+                    "total_slots": 0,
+                    "booked_appointments": len(day_appointments),
+                    "available_slots": 0,
+                    "note": "Set slot_duration_minutes (15–120) on this schedule to enable bookable slots.",
+                    "appointments": [
+                        {
+                            "appointment_ref": apt.appointment_ref,
+                            "patient_name": f"{apt.patient.user.first_name} {apt.patient.user.last_name}",
+                            "appointment_time": apt.appointment_time,
+                            "status": apt.status,
+                            "chief_complaint": apt.chief_complaint
+                        } for apt in day_appointments
+                    ],
                 })
             else:
                 daily_schedules.append({
@@ -325,6 +347,18 @@ class DoctorService:
         if schedule_data.get("break_end_time"):
             break_end_time = datetime.strptime(schedule_data["break_end_time"], "%H:%M").time()
         
+        if "slot_duration_minutes" not in schedule_data or schedule_data.get("slot_duration_minutes") is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="slot_duration_minutes is required (minutes per bookable slot, 15–120).",
+            )
+        slot_mins = int(schedule_data["slot_duration_minutes"])
+        if slot_mins < 15 or slot_mins > 120:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="slot_duration_minutes must be between 15 and 120.",
+            )
+
         # Create schedule
         schedule = DoctorSchedule(
             id=uuid.uuid4(),
@@ -333,7 +367,7 @@ class DoctorService:
             day_of_week=schedule_data["day_of_week"],
             start_time=start_time,
             end_time=end_time,
-            slot_duration_minutes=schedule_data.get("slot_duration_minutes", 30),
+            slot_duration_minutes=slot_mins,
             max_patients_per_slot=schedule_data.get("max_patients_per_slot", 1),
             break_start_time=break_start_time,
             break_end_time=break_end_time,
@@ -612,6 +646,18 @@ class DoctorService:
             break_start_time = datetime.strptime(schedule_data["break_start_time"], "%H:%M").time()
         if schedule_data.get("break_end_time"):
             break_end_time = datetime.strptime(schedule_data["break_end_time"], "%H:%M").time()
+        if "slot_duration_minutes" not in schedule_data or schedule_data.get("slot_duration_minutes") is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="slot_duration_minutes is required (minutes per bookable slot, 15–120).",
+            )
+        slot_mins = int(schedule_data["slot_duration_minutes"])
+        if slot_mins < 15 or slot_mins > 120:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="slot_duration_minutes must be between 15 and 120.",
+            )
+
         schedule = DoctorSchedule(
             id=uuid.uuid4(),
             hospital_id=acting_user.hospital_id,
@@ -619,7 +665,7 @@ class DoctorService:
             day_of_week=schedule_data["day_of_week"],
             start_time=start_time,
             end_time=end_time,
-            slot_duration_minutes=schedule_data.get("slot_duration_minutes", 30),
+            slot_duration_minutes=slot_mins,
             max_patients_per_slot=schedule_data.get("max_patients_per_slot", 1),
             break_start_time=break_start_time,
             break_end_time=break_end_time,

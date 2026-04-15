@@ -78,7 +78,6 @@ class LabCatalogueRepository:
         """Persist new category."""
         self.db.add(category)
         await self.db.flush()
-        await self.db.refresh(category)
         return category
 
     async def update_category(self, category: LabTestCategory) -> LabTestCategory:
@@ -182,7 +181,6 @@ class LabCatalogueRepository:
         """Persist new test."""
         self.db.add(test)
         await self.db.flush()
-        await self.db.refresh(test)
         return test
 
     async def update_test(self, test: LabTest) -> LabTest:

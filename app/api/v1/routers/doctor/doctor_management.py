@@ -201,14 +201,7 @@ async def update_appointment(
     - Only Doctors can update their appointments
     """
     doctor_service = DoctorService(db)
-    update_data = {
-        "appointment_date": request.appointment_date,
-        "appointment_time": request.appointment_time,
-        "duration_minutes": request.duration_minutes,
-        "appointment_type": request.appointment_type,
-        "notes": request.notes,
-        "consultation_fee": request.consultation_fee
-    }
+    update_data = request.model_dump(exclude_unset=True)
     result = await doctor_service.update_appointment(appointment_ref, update_data, current_user)
     return success_response(message="Appointment updated successfully", data=result)
 
