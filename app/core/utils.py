@@ -3,8 +3,21 @@ Utility functions for common operations across the application.
 """
 import secrets
 import string
-from datetime import datetime, time
+from datetime import datetime, time, timezone
 from typing import Optional, Union
+
+
+def ensure_datetime_utc_aware(dt: Optional[datetime]) -> Optional[datetime]:
+    """
+    Normalize a datetime for API output and SQL binds against timestamptz columns.
+    PostgreSQL/asyncpg often return timezone-aware values; naive Python datetimes (e.g. from
+    strptime) mixed with those can raise: TypeError: can't compare offset-naive and offset-aware datetimes.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def generate_barcode_png_bytes(barcode_value: str) -> Optional[bytes]:
@@ -402,3 +415,27 @@ def resolve_user_id(user_id: Optional[Union[str, int]]) -> Optional[str]:
     if user_id is None:
         return None
     return str(user_id)
+
+
+def absolute_public_asset_url(path: Optional[str]) -> Optional[str]:
+    """
+    Turn stored relative paths like `/uploads/...` into absolute URLs using `settings.APP_PUBLIC_URL`.
+
+    SPAs (e.g. Vite on :3000) request `<img src="/uploads/...">` on the wrong origin and get 404.
+    Prefixing with the API public base fixes display while keeping DB values portable.
+    """
+    if path is None:
+        return None
+    s = str(path).strip()
+    if not s:
+        return None
+    if s.startswith(("http://", "https://", "//")):
+        return s
+    from app.core.config import settings
+
+    base = (getattr(settings, "APP_PUBLIC_URL", None) or "").strip().rstrip("/")
+    if not base:
+        return s
+    if not s.startswith("/"):
+        s = "/" + s
+    return f"{base}{s}"
