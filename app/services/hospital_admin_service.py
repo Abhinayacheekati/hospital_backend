@@ -1669,6 +1669,18 @@ class HospitalAdminService:
                     detail={"code": "BREAK_OUT_OF_RANGE", "message": "Break times must be within working hours"}
                 )
         
+        if "slot_duration_minutes" not in schedule_data or schedule_data.get("slot_duration_minutes") is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "SLOT_DURATION_REQUIRED", "message": "slot_duration_minutes is required (15–120)."},
+            )
+        slot_mins = int(schedule_data["slot_duration_minutes"])
+        if slot_mins < 15 or slot_mins > 120:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_SLOT_DURATION", "message": "slot_duration_minutes must be between 15 and 120."},
+            )
+
         # Create schedule
         schedule = DoctorSchedule(
             id=uuid.uuid4(),
@@ -1677,7 +1689,7 @@ class HospitalAdminService:
             day_of_week=schedule_data['day_of_week'],
             start_time=start_time,
             end_time=end_time,
-            slot_duration_minutes=schedule_data.get('slot_duration_minutes', 30),
+            slot_duration_minutes=slot_mins,
             break_start_time=break_start_time,
             break_end_time=break_end_time,
             max_patients_per_slot=schedule_data.get('max_patients_per_slot', 1),

@@ -65,7 +65,7 @@ class ScheduleCreate(BaseModel):
     day_of_week: str = Field(..., pattern="^(MONDAY|TUESDAY|WEDNESDAY|THURSDAY|FRIDAY|SATURDAY|SUNDAY)$")
     start_time: str = Field(..., pattern="^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$")
     end_time: str = Field(..., pattern="^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$")
-    slot_duration_minutes: int = Field(30, ge=15, le=120)
+    slot_duration_minutes: int = Field(..., ge=15, le=120, description="Minutes per slot — required; drives patient booking")
     break_start_time: Optional[str] = Field(None, pattern="^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$")
     break_end_time: Optional[str] = Field(None, pattern="^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$")
     max_patients_per_slot: int = Field(1, ge=1, le=5)
@@ -85,11 +85,14 @@ class ScheduleUpdate(BaseModel):
 
 
 class AppointmentUpdate(BaseModel):
-    """Request to update appointment"""
+    """Request to update appointment (doctor portal PUT /doctor-management/appointments/{ref})."""
     appointment_date: Optional[str] = Field(None, pattern="^\\d{4}-\\d{2}-\\d{2}$")
     appointment_time: Optional[str] = Field(None, pattern="^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$")
     status: Optional[str] = None
     notes: Optional[str] = None
+    duration_minutes: Optional[int] = Field(None, ge=15, le=180, description="Slot length in minutes")
+    appointment_type: Optional[str] = Field(None, max_length=50, description="e.g. IN_PERSON, ONLINE")
+    consultation_fee: Optional[float] = Field(None, ge=0, description="Consultation fee if updating")
 
 
 # ============================================================================
