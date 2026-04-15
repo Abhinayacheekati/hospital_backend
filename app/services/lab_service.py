@@ -122,7 +122,6 @@ class LabService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"code": "DUPLICATE_CATEGORY_CODE", "message": f"Category code '{category_data['category_code']}' already exists"}
             )
-        now_utc = datetime.utcnow().replace(tzinfo=None)
         category = LabTestCategory(
             hospital_id=self.hospital_id,
             category_code=category_data["category_code"].upper().strip(),
@@ -130,8 +129,6 @@ class LabService:
             description=category_data.get("description"),
             display_order=category_data.get("display_order", 0),
             is_active=category_data.get("is_active", True),
-            created_at=now_utc,
-            updated_at=now_utc,
         )
         await repo.create_category(category)
         await self.db.commit()
@@ -237,7 +234,6 @@ class LabService:
             cat = await repo.get_category_by_id(category_id)
             if not cat:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"code": "CATEGORY_NOT_FOUND", "message": "Category not found"})
-        now_utc = datetime.utcnow().replace(tzinfo=None)
         test = LabTest(
             hospital_id=self.hospital_id,
             category_id=category_id,
@@ -253,8 +249,6 @@ class LabService:
             reference_ranges=test_data.get("reference_ranges") or {},
             status=LabTestStatus.ACTIVE,
             is_active=test_data.get("is_active", True),
-            created_at=now_utc,
-            updated_at=now_utc,
         )
         await repo.create_test(test)
         await self.db.commit()
