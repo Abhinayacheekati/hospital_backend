@@ -14,6 +14,7 @@ from fastapi import HTTPException, status
 from app.models.user import User, Role, user_roles
 from app.models.patient import PatientProfile, Appointment, MedicalRecord, Admission
 from app.models.hospital import Department, StaffDepartmentAssignment
+from app.models.receptionist import ReceptionistProfile
 from app.models.tenant import Hospital
 from app.core.enums import UserRole, AppointmentStatus, UserStatus
 from app.core.utils import generate_patient_ref, generate_appointment_ref, parse_time_string
@@ -108,7 +109,9 @@ class ClinicalService:
             "user_id": current_user.id,  # Keep as UUID for database operations
             "hospital_id": str(current_user.hospital_id) if current_user.hospital_id else None,
             "role": user_roles[0] if user_roles else None,
-            "all_roles": user_roles
+            "all_roles": user_roles,
+            # Keep authenticated principal as fallback when tenant session cannot resolve User row.
+            "current_user": current_user,
         }
     
     async def validate_receptionist_access(self, user_context: dict) -> None:
@@ -157,6 +160,10 @@ class ClinicalService:
             .where(User.id == user_context["user_id"])
         )
         receptionist_user = receptionist_result.scalar_one_or_none()
+        if not receptionist_user:
+            fallback_user = user_context.get("current_user")
+            if fallback_user and str(getattr(fallback_user, "id", "")) == str(user_context.get("user_id")):
+                receptionist_user = fallback_user
         
         if not receptionist_user:
             raise HTTPException(
@@ -167,11 +174,64 @@ class ClinicalService:
         # Get department assignment
         assignment_result = await self.db.execute(
             select(StaffDepartmentAssignment)
-            .where(StaffDepartmentAssignment.staff_id == user_context["user_id"])
+            .where(
+                and_(
+                    StaffDepartmentAssignment.staff_id == user_context["user_id"],
+                    StaffDepartmentAssignment.is_active == True,
+                )
+            )
             .options(selectinload(StaffDepartmentAssignment.department))
         )
         assignment = assignment_result.scalar_one_or_none()
-        
+
+        # Legacy/fallback compatibility:
+        # some setups have ReceptionistProfile metadata but no StaffDepartmentAssignment row
+        # in the current routed DB.
+        if not assignment:
+            rp_result = await self.db.execute(
+                select(ReceptionistProfile)
+                .where(
+                    and_(
+                        ReceptionistProfile.user_id == user_context["user_id"],
+                        ReceptionistProfile.hospital_id == receptionist_user.hospital_id,
+                    )
+                )
+                .options(selectinload(ReceptionistProfile.department))
+            )
+            rp = rp_result.scalar_one_or_none()
+            if rp and rp.department:
+                class _AssignmentLike:
+                    def __init__(self, department):
+                        self.department = department
+                assignment = _AssignmentLike(rp.department)
+
+        if not assignment:
+            md = getattr(receptionist_user, "user_metadata", {}) or {}
+            md_name = (md.get("department_name") or "").strip()
+            md_id_raw = md.get("department_id")
+            if md_name:
+                dept_obj = None
+                if md_id_raw:
+                    try:
+                        md_id = uuid.UUID(str(md_id_raw))
+                        dres = await self.db.execute(
+                            select(Department).where(Department.id == md_id)
+                        )
+                        dept_obj = dres.scalar_one_or_none()
+                    except Exception:
+                        dept_obj = None
+                if not dept_obj:
+                    class _DepartmentLike:
+                        def __init__(self, did, name):
+                            self.id = did
+                            self.name = name
+                    dept_obj = _DepartmentLike(str(md_id_raw) if md_id_raw else None, md_name)
+
+                class _AssignmentLike:
+                    def __init__(self, department):
+                        self.department = department
+                assignment = _AssignmentLike(dept_obj)
+
         if not assignment:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

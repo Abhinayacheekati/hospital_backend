@@ -32,7 +32,7 @@ router = APIRouter(
 async def create_result(
     order_item_id: uuid.UUID,
     result_data: ResultCreateRequest,
-    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -94,7 +94,7 @@ async def create_result(
 @router.get("/results/{result_id}", response_model=TestResultResponse)
 async def get_result(
     result_id: uuid.UUID,
-    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -127,7 +127,7 @@ async def get_result(
 async def update_result(
     result_id: uuid.UUID,
     result_data: ResultCreateRequest,
-    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -174,7 +174,7 @@ async def update_result(
 async def verify_result(
     result_id: uuid.UUID,
     verify_data: ResultVerifyRequest,
-    current_user: User = Depends(require_roles(["LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -217,7 +217,7 @@ async def verify_result(
 async def release_result(
     result_id: uuid.UUID,
     release_data: ResultReleaseRequest,
-    current_user: User = Depends(require_roles(["LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -293,7 +293,7 @@ async def release_result(
 async def reject_result(
     result_id: uuid.UUID,
     reject_data: ResultRejectRequest,
-    current_user: User = Depends(require_roles(["LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -336,7 +336,7 @@ async def reject_result(
 async def approve_result(
     result_id: uuid.UUID,
     approval_data: ResultApproveRequest,
-    current_user: User = Depends(require_roles(["PATHOLOGIST", "HOSPITAL_ADMIN"])),
+    current_user: User = Depends(require_roles(["PATHOLOGIST", "HOSPITAL_ADMIN", "LAB_SUPERVISOR", "LAB_ADMIN"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -380,7 +380,7 @@ async def get_worklist(
     result_status: Optional[ResultStatus] = Query(None, description="Filter by result status"),
     priority: Optional[LabOrderPriority] = Query(None, description="Filter by order priority"),
     test_code: Optional[str] = Query(None, description="Filter by test code"),
-    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -424,7 +424,7 @@ async def get_worklist(
 async def create_result_for_order(
     order_id: uuid.UUID,
     result_data: ResultCreateRequest,
-    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -459,7 +459,7 @@ async def create_result_for_order(
 @router.get("/orders/{order_id}/results", response_model=List[TestResultResponse])
 async def get_results_for_order(
     order_id: uuid.UUID,
-    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -492,7 +492,7 @@ async def get_results_for_order(
 async def generate_report(
     order_id: uuid.UUID,
     report_data: ReportGenerateRequest,
-    current_user: User = Depends(require_roles(["LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -532,7 +532,7 @@ async def generate_report(
 @router.get("/orders/{order_id}/reports", response_model=ReportHistoryResponse)
 async def get_report_history(
     order_id: uuid.UUID,
-    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -564,7 +564,7 @@ async def get_report_history(
 @router.get("/reports/{report_id}", response_model=LabReportResponse)
 async def get_report(
     report_id: uuid.UUID,
-    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """

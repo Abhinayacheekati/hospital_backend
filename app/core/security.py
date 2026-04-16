@@ -3,7 +3,7 @@ Security utilities for authentication and authorization.
 Handles JWT tokens, password hashing, and permission checking.
 """
 from datetime import datetime, timedelta
-from typing import Optional, List
+from typing import Any, List, Optional
 from passlib.context import CryptContext
 import logging
 from jose import JWTError, jwt
@@ -232,29 +232,32 @@ def require_permissions(required_permissions: List[str]):
     return permission_checker
 
 
-def require_roles(required_roles: List[str]):
+def require_roles(required_roles: List[Any]):
     """
-    Decorator to require specific roles for endpoint access.
+    Require at least one of the given roles (string names or UserRole enums).
     
     Usage:
-        @app.get("/doctor-only")
-        @require_roles(["DOCTOR", "HOSPITAL_ADMIN"])
-        async def doctor_endpoint(current_user: User = Depends(get_current_user)):
-            return {"message": "Doctor access granted"}
+        Depends(require_roles(["DOCTOR", "HOSPITAL_ADMIN"]))
+        Depends(require_roles([UserRole.LAB_TECH, UserRole.HOSPITAL_ADMIN]))
     """
+    from app.core.enums import UserRole as _UR
+
+    normalized: List[str] = []
+    for r in required_roles:
+        if isinstance(r, _UR):
+            normalized.append(r.value)
+        else:
+            normalized.append(str(r))
+
     def role_checker(current_user: User = Depends(get_current_user)):
-        # Get user roles
         user_roles = [role.name for role in current_user.roles]
-        
-        # Check if user has required roles
-        if not any(role in user_roles for role in required_roles):
+        if not any(role in user_roles for role in normalized):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Required roles: {', '.join(required_roles)}"
+                detail=f"Required roles: {', '.join(normalized)}",
             )
-        
         return current_user
-    
+
     return role_checker
 
 

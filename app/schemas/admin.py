@@ -351,10 +351,10 @@ class StaffCreate(BaseModel):
                 raise ValueError("consultation_type is only allowed when role is DOCTOR")
             if self.availability_time and str(self.availability_time).strip():
                 raise ValueError("availability_time is only allowed when role is DOCTOR")
-        if role not in ("DOCTOR", "NURSE", "RECEPTIONIST"):
+        if role not in ("DOCTOR", "NURSE", "RECEPTIONIST", "LAB_TECH", "PHARMACIST"):
             if self.department_name and str(self.department_name).strip():
                 raise ValueError(
-                    "department_name is only allowed when role is DOCTOR, NURSE, or RECEPTIONIST"
+                    "department_name is only allowed when role is DOCTOR, NURSE, RECEPTIONIST, LAB_TECH, or PHARMACIST"
                 )
         recv_any = (
             self.receptionist_work_area is not None
