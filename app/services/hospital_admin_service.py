@@ -2536,7 +2536,13 @@ class HospitalAdminService:
         # Handle rescheduling (change date/time while keeping status)
         if reschedule_date or reschedule_time:
             if reschedule_date:
-                appointment.appointment_date = reschedule_date
+                parsed_reschedule_date = _parse_iso_date(reschedule_date)
+                if not parsed_reschedule_date:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail={"code": "INVALID_RESCHEDULE_DATE", "message": "reschedule_date must be a valid date"},
+                    )
+                appointment.appointment_date = parsed_reschedule_date
             if reschedule_time:
                 appointment.appointment_time = parse_time_string(reschedule_time)
             
