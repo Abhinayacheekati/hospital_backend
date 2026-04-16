@@ -946,16 +946,24 @@ class AppointmentListOut(BaseModel):
 class AppointmentDetailsOut(BaseModel):
     """Appointment details response"""
     id: str
-    patient_name: str
-    doctor_name: str
-    department: str
-    appointment_date: str
-    appointment_time: str
+    appointment_number: Optional[str] = None
+    patient: Optional[Dict[str, Any]] = None
+    doctor: Optional[Dict[str, Any]] = None
+    department: Optional[Dict[str, Any]] = None
+    appointment_date: Any
+    appointment_time: Optional[str] = None
     status: str
-    appointment_type: str
-    notes: Optional[str]
+    appointment_type: Optional[str] = None
+    chief_complaint: Optional[str] = None
+    symptoms: Optional[Any] = None
+    notes: Optional[str] = None
+    is_emergency: Optional[bool] = None
+    consultation_fee: Optional[float] = None
+    payment_status: Optional[str] = None
     created_at: str
     updated_at: str
+    cancelled_at: Optional[str] = None
+    cancellation_reason: Optional[str] = None
 
 
 class StaffListOut(BaseModel):
