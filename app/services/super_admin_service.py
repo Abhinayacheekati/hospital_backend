@@ -915,8 +915,43 @@ class SuperAdminService:
         Subscription lifecycle analytics for dashboard.
         Uses existing HospitalSubscription + Plan models.
         """
-        from datetime import datetime as _dt, timezone as _tz
+        from datetime import date as _date, datetime as _dt, timezone as _tz
         from sqlalchemy import case
+
+        def _to_utc_datetime(v: Any) -> Optional[_dt]:
+            if v is None:
+                return None
+            if isinstance(v, _dt):
+                return v if v.tzinfo else v.replace(tzinfo=_tz.utc)
+            if isinstance(v, _date):
+                return _dt(v.year, v.month, v.day, tzinfo=_tz.utc)
+            if isinstance(v, str):
+                try:
+                    parsed = parse_date_string(v)
+                    if parsed:
+                        return parsed if parsed.tzinfo else parsed.replace(tzinfo=_tz.utc)
+                except Exception:
+                    return None
+            return None
+
+        def _to_iso_date(v: Any) -> Optional[str]:
+            if v is None:
+                return None
+            if isinstance(v, _dt):
+                return v.date().isoformat()
+            if isinstance(v, _date):
+                return v.isoformat()
+            if isinstance(v, str):
+                try:
+                    parsed = parse_date_string(v)
+                    if parsed:
+                        return parsed.date().isoformat()
+                except Exception:
+                    return v[:10] if len(v) >= 10 else v
+            return None
+
+        def _status_value(v: Any) -> str:
+            return getattr(v, "value", str(v or "")).upper()
 
         now = _dt.now(_tz.utc)
         if date_from and getattr(date_from, "tzinfo", None) is None:
@@ -941,23 +976,22 @@ class SuperAdminService:
 
         for hospital, sub, plan in rows:
             # Determine expiry in a timezone-safe way
-            end_dt = sub.end_date
-            if end_dt and getattr(end_dt, "tzinfo", None) is None:
-                end_dt = end_dt.replace(tzinfo=_tz.utc)
+            end_dt = _to_utc_datetime(getattr(sub, "end_date", None))
             if end_dt and end_dt < now:
                 effective_status = SubscriptionStatus.EXPIRED
             else:
-                effective_status = sub.status
-            if status and str(effective_status).upper() != str(status).upper():
+                effective_status = getattr(sub, "status", None)
+            effective_status_value = _status_value(effective_status)
+            if status and effective_status_value != str(status).strip().upper():
                 continue
 
-            if effective_status == SubscriptionStatus.ACTIVE:
+            if effective_status_value == SubscriptionStatus.ACTIVE.value:
                 active += 1
-            elif effective_status == SubscriptionStatus.EXPIRED:
+            elif effective_status_value == SubscriptionStatus.EXPIRED.value:
                 expired += 1
-            elif effective_status == SubscriptionStatus.CANCELLED:
+            elif effective_status_value == SubscriptionStatus.CANCELLED.value:
                 cancelled += 1
-            elif effective_status == SubscriptionStatus.SUSPENDED:
+            elif effective_status_value == SubscriptionStatus.SUSPENDED.value:
                 suspended += 1
 
             # Amount paid: if you later add invoicing, wire it here.
@@ -970,12 +1004,12 @@ class SuperAdminService:
                 {
                     "hospitalName": hospital.name,
                     "planType": plan.display_name if plan else None,
-                    "subscriptionStartDate": sub.start_date.date().isoformat() if sub.start_date else None,
-                    "subscriptionEndDate": sub.end_date.date().isoformat() if sub.end_date else None,
-                    "status": str(effective_status).lower(),
+                    "subscriptionStartDate": _to_iso_date(getattr(sub, "start_date", None)),
+                    "subscriptionEndDate": _to_iso_date(getattr(sub, "end_date", None)),
+                    "status": effective_status_value.lower(),
                     "billingCycle": billing_cycle,
                     "amountPaid": amount_paid,
-                    "renewalDate": sub.end_date.date().isoformat() if sub.end_date else None,
+                    "renewalDate": _to_iso_date(getattr(sub, "end_date", None)),
                     "autoRenewal": bool(sub.auto_renew),
                 }
             )
@@ -1016,6 +1050,9 @@ class SuperAdminService:
                     }
                 )
         except Exception:
+            # If a query fails, PostgreSQL marks the transaction as aborted.
+            # Roll back so subsequent best-effort analytics queries can continue.
+            await self.db.rollback()
             growth_rows = []
 
         # Plan distribution
@@ -1077,6 +1114,8 @@ class SuperAdminService:
                     }
                 )
         except Exception:
+            # Reset aborted transaction state before continuing.
+            await self.db.rollback()
             churn_rows = []
 
         # Revenue contribution chart: placeholders (no subscription payments table yet)
