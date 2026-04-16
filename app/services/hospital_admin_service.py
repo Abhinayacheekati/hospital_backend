@@ -136,6 +136,70 @@ _STAFF_ROLE_VALUES_ORDERED: List[str] = [
     UserRole.PHARMACIST.value,
 ]
 
+# Same definitions as main.py seed_superadmin(); tenant DBs get schema via Alembic but often have no role rows.
+_CANONICAL_ROLE_BY_NAME: Dict[str, Dict[str, Any]] = {
+    "SUPER_ADMIN": {
+        "display_name": "Super Administrator",
+        "description": "Platform Super Administrator",
+        "level": 100,
+    },
+    "HOSPITAL_ADMIN": {
+        "display_name": "Hospital Administrator",
+        "description": "Hospital Administrator",
+        "level": 90,
+    },
+    "DOCTOR": {
+        "display_name": "Doctor",
+        "description": "Medical Doctor",
+        "level": 80,
+    },
+    "PATHOLOGIST": {
+        "display_name": "Pathologist",
+        "description": "Pathologist - signs off on lab results",
+        "level": 78,
+    },
+    "NURSE": {
+        "display_name": "Nurse",
+        "description": "Registered Nurse",
+        "level": 70,
+    },
+    "PHARMACIST": {
+        "display_name": "Pharmacist",
+        "description": "Licensed Pharmacist",
+        "level": 65,
+    },
+    "LAB_ADMIN": {
+        "display_name": "Lab Administrator",
+        "description": "Laboratory Department Administrator",
+        "level": 64,
+    },
+    "LAB_SUPERVISOR": {
+        "display_name": "Lab Supervisor",
+        "description": "Laboratory Supervisor - verifies and releases results",
+        "level": 63,
+    },
+    "LAB_TECH": {
+        "display_name": "Lab Technician",
+        "description": "Laboratory Technician",
+        "level": 62,
+    },
+    "RECEPTIONIST": {
+        "display_name": "Receptionist",
+        "description": "Front Desk Receptionist",
+        "level": 60,
+    },
+    "STAFF": {
+        "display_name": "Staff",
+        "description": "General Staff Member",
+        "level": 50,
+    },
+    "PATIENT": {
+        "display_name": "Patient",
+        "description": "Hospital Patient",
+        "level": 10,
+    },
+}
+
 
 class HospitalAdminService:
     """Service class for Hospital Admin operations"""
@@ -144,6 +208,35 @@ class HospitalAdminService:
         self.db = db
         self.hospital_id = hospital_id
         self.security = SecurityManager()
+
+    async def _get_or_create_role_for_staff(self, role_name: Any) -> Role:
+        """
+        Return the Role row for staff assignment. Creates a canonical row if missing.
+
+        Per-hospital tenant databases have the `roles` table (migrations) but are not seeded by
+        startup `seed_superadmin()`, so lookups like DOCTOR can fail until the row exists.
+        """
+        rn = (role_name.value if isinstance(role_name, UserRole) else str(role_name or "")).strip()
+        result = await self.db.execute(select(Role).where(Role.name == rn))
+        role = result.scalar_one_or_none()
+        if role:
+            return role
+        spec = _CANONICAL_ROLE_BY_NAME.get(rn)
+        if not spec:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "ROLE_NOT_FOUND", "message": f"Role {rn} not found"},
+            )
+        role = Role(
+            id=uuid.uuid4(),
+            name=rn,
+            display_name=spec["display_name"],
+            description=spec["description"],
+            level=spec["level"],
+        )
+        self.db.add(role)
+        await self.db.flush()
+        return role
     
     # ============================================================================
     # TASK 2.1 - DEPARTMENT MANAGEMENT
@@ -634,13 +727,7 @@ class HospitalAdminService:
                     },
                 )
 
-        role_result = await self.db.execute(select(Role).where(Role.name == role_name))
-        role = role_result.scalar_one_or_none()
-        if not role:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={"code": "ROLE_NOT_FOUND", "message": f"Role {role_name} not found"},
-            )
+        role = await self._get_or_create_role_for_staff(role_name)
 
         department_for_create = None
         dept_label = "GENERAL"
@@ -2176,7 +2263,11 @@ class HospitalAdminService:
         
         return {
             "doctor_id": str(doctor_id),
-            "doctor_name": f"{doctor.user.first_name} {doctor.user.last_name}",
+            "doctor_name": (
+                f"{doctor.first_name} {doctor.last_name}"
+                if hasattr(doctor, "first_name")
+                else f"{doctor.user.first_name} {doctor.user.last_name}"
+            ),
             "schedules": schedule_list
         }
 
@@ -2252,7 +2343,11 @@ class HospitalAdminService:
         appointment_list = []
         for appointment in appointments:
             patient_name = f"{appointment.patient.user.first_name} {appointment.patient.user.last_name}" if appointment.patient and appointment.patient.user else "Unknown"
-            doctor_name = f"{appointment.doctor.user.first_name} {appointment.doctor.user.last_name}" if appointment.doctor and appointment.doctor.user else "Unknown"
+            doctor_user = None
+            if appointment.doctor:
+                # Appointment.doctor is User in current model; tolerate legacy/profile-shaped objects too.
+                doctor_user = appointment.doctor if hasattr(appointment.doctor, "first_name") else getattr(appointment.doctor, "user", None)
+            doctor_name = f"{doctor_user.first_name} {doctor_user.last_name}" if doctor_user else "Unknown"
             department_name = appointment.department.name if appointment.department else "Unknown"
             
             appointment_list.append({
@@ -2331,15 +2426,18 @@ class HospitalAdminService:
         
         # Format doctor information
         doctor_info = None
-        if appointment.doctor and appointment.doctor.user:
+        doctor_user = None
+        if appointment.doctor:
+            doctor_user = appointment.doctor if hasattr(appointment.doctor, "first_name") else getattr(appointment.doctor, "user", None)
+        if doctor_user:
             doctor_info = {
                 "id": str(appointment.doctor_id),
-                "name": f"{appointment.doctor.user.first_name} {appointment.doctor.user.last_name}",
-                "email": appointment.doctor.user.email,
-                "phone": appointment.doctor.user.phone,
-                "doctor_id": appointment.doctor.doctor_id,
-                "specialization": appointment.doctor.specialization,
-                "designation": appointment.doctor.designation
+                "name": f"{doctor_user.first_name} {doctor_user.last_name}",
+                "email": doctor_user.email,
+                "phone": doctor_user.phone,
+                "doctor_id": getattr(appointment.doctor, "doctor_id", None),
+                "specialization": getattr(appointment.doctor, "specialization", None),
+                "designation": getattr(appointment.doctor, "designation", None),
             }
         
         # Format department information

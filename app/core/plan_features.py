@@ -21,7 +21,8 @@ ALL_FEATURE_KEYS: FrozenSet[str] = frozenset(
 # BASIC tier ≈ STANDARD: Lab on, Video + Pharmacy off. PREMIUM: all on. FREE: conservative.
 DEFAULT_FEATURES_BY_PLAN: Dict[str, Dict[str, bool]] = {
     "FREE": {
-        FEATURE_LAB_TESTS: False,
+        # Lab is core for hospitals; keep on by default (override in plan JSON to disable).
+        FEATURE_LAB_TESTS: True,
         FEATURE_VIDEO_CONSULTATION: False,
         FEATURE_PHARMACY: False,
     },

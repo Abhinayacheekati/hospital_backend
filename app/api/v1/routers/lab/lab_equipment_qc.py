@@ -36,7 +36,7 @@ router = APIRouter(
 @router.post("/equipment", response_model=EquipmentResponse)
 async def create_equipment(
     equipment_data: EquipmentCreateRequest,
-    current_user: User = Depends(require_roles(["LAB_ADMIN", "LAB_SUPERVISOR"])),
+    current_user: User = Depends(require_roles(["LAB_ADMIN", "LAB_SUPERVISOR", "HOSPITAL_ADMIN", "LAB_TECH"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -78,7 +78,7 @@ async def get_equipment_list(
     category: Optional[EquipmentCategory] = Query(None, description="Filter by equipment category"),
     status: Optional[EquipmentStatus] = Query(None, description="Filter by equipment status"),
     active_only: bool = Query(True, description="Show only active equipment"),
-    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -120,7 +120,7 @@ async def get_equipment_list(
 @router.get("/equipment/{equipment_id}", response_model=EquipmentResponse)
 async def get_equipment(
     equipment_id: uuid.UUID,
-    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -153,7 +153,7 @@ async def get_equipment(
 async def update_equipment(
     equipment_id: uuid.UUID,
     equipment_data: EquipmentUpdateRequest,
-    current_user: User = Depends(require_roles(["LAB_ADMIN", "LAB_SUPERVISOR"])),
+    current_user: User = Depends(require_roles(["LAB_ADMIN", "LAB_SUPERVISOR", "HOSPITAL_ADMIN", "LAB_TECH"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -195,7 +195,7 @@ async def update_equipment(
 async def update_equipment_status(
     equipment_id: uuid.UUID,
     status_data: EquipmentStatusUpdateRequest,
-    current_user: User = Depends(require_roles(["LAB_ADMIN", "LAB_SUPERVISOR"])),
+    current_user: User = Depends(require_roles(["LAB_ADMIN", "LAB_SUPERVISOR", "HOSPITAL_ADMIN", "LAB_TECH"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -240,7 +240,7 @@ async def get_equipment_logs(
     page: int = Query(1, ge=1, description="Page number"),
     limit: int = Query(50, ge=1, le=100, description="Items per page"),
     maintenance_type: Optional[MaintenanceType] = Query(None, description="Filter by maintenance type"),
-    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -285,7 +285,7 @@ async def get_equipment_logs(
 async def create_maintenance_log(
     equipment_id: uuid.UUID,
     log_data: MaintenanceLogCreateRequest,
-    current_user: User = Depends(require_roles(["LAB_ADMIN", "LAB_SUPERVISOR"])),
+    current_user: User = Depends(require_roles(["LAB_ADMIN", "LAB_SUPERVISOR", "HOSPITAL_ADMIN", "LAB_TECH"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -341,7 +341,7 @@ async def get_all_maintenance_logs(
     maintenance_type: Optional[MaintenanceType] = Query(None, description="Filter by maintenance type"),
     date_from: Optional[datetime] = Query(None, description="Filter from date"),
     date_to: Optional[datetime] = Query(None, description="Filter to date"),
-    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -382,7 +382,7 @@ async def get_all_maintenance_logs(
 @router.get("/equipment/logs/{log_id}", response_model=MaintenanceLogResponse)
 async def get_maintenance_log(
     log_id: uuid.UUID,
-    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -422,7 +422,7 @@ async def get_maintenance_log(
 @router.post("/qc/rules", response_model=QCRuleResponse)
 async def create_qc_rule(
     rule_data: QCRuleCreateRequest,
-    current_user: User = Depends(require_roles(["LAB_ADMIN", "LAB_SUPERVISOR"])),
+    current_user: User = Depends(require_roles(["LAB_ADMIN", "LAB_SUPERVISOR", "HOSPITAL_ADMIN", "LAB_TECH"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -479,7 +479,7 @@ async def get_qc_rules(
     section: Optional[EquipmentCategory] = Query(None, description="Filter by lab section"),
     test_code: Optional[str] = Query(None, description="Filter by test code"),
     active_only: bool = Query(True, description="Show only active rules"),
-    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -524,7 +524,7 @@ async def get_qc_rules(
 @router.post("/qc/runs", response_model=QCRunResponse)
 async def create_qc_run(
     run_data: QCRunCreateRequest,
-    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -583,7 +583,7 @@ async def get_qc_runs(
     equipment_id: Optional[uuid.UUID] = Query(None, description="Filter by equipment"),
     date_from: Optional[datetime] = Query(None, description="Filter from date"),
     date_to: Optional[datetime] = Query(None, description="Filter to date"),
-    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """
@@ -626,7 +626,7 @@ async def get_qc_runs(
 async def get_qc_status(
     section: EquipmentCategory = Query(..., description="Lab section to check"),
     equipment_id: Optional[uuid.UUID] = Query(None, description="Specific equipment (optional)"),
-    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN"])),
+    current_user: User = Depends(require_roles(["LAB_TECH", "LAB_SUPERVISOR", "LAB_ADMIN", "HOSPITAL_ADMIN", "PATHOLOGIST"])),
     db: AsyncSession = Depends(get_db_session)
 ):
     """

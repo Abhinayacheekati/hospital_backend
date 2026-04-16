@@ -43,7 +43,7 @@ router = APIRouter(prefix="/hospital-admin")
 
 async def get_hospital_admin_service(
     context: Dict[str, Any] = Depends(require_hospital_admin_context()),
-    db: AsyncSession = Depends(get_db_session)
+    db: AsyncSession = Depends(get_platform_db_session)
 ) -> HospitalAdminService:
     """Get Hospital Admin service instance with proper access control"""
     return HospitalAdminService(db, context["hospital_id"])
